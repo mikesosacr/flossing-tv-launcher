@@ -100,15 +100,19 @@ fun frostedBackdrop(backdrop: Bitmap, heightFraction: Float): ImageBitmap {
 }
 
 // The wallpaper as it appears on screen (with the readability scrim, [shade] = its alpha at x, y as fractions), blurred
-fun frostedWallpaper(wallpaper: Bitmap, shade: (Float, Float) -> Float): ImageBitmap {
+fun frostedWallpaper(wallpaper: Bitmap, shade: (Float, Float) -> Float, tint: Color = Color.Transparent): ImageBitmap {
     val (w, h, px) = blurredPixels(wallpaper)
+    val tintAlpha = tint.alpha
+    val tintRed = (tint.red * 255).toInt()
+    val tintGreen = (tint.green * 255).toInt()
+    val tintBlue = (tint.blue * 255).toInt()
     for (y in 0 until h) {
         for (x in 0 until w) {
             val k = 1f - shade(x.toFloat() / w, y.toFloat() / h)
             val p = px[y * w + x]
-            val r = (((p shr 16) and 0xFF) * k).toInt()
-            val g = (((p shr 8) and 0xFF) * k).toInt()
-            val b = ((p and 0xFF) * k).toInt()
+            val r = ((((p shr 16) and 0xFF) * (1 - tintAlpha) + tintRed * tintAlpha) * k).toInt()
+            val g = ((((p shr 8) and 0xFF) * (1 - tintAlpha) + tintGreen * tintAlpha) * k).toInt()
+            val b = (((p and 0xFF) * (1 - tintAlpha) + tintBlue * tintAlpha) * k).toInt()
             px[y * w + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }
     }

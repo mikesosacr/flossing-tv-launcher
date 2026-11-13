@@ -28,6 +28,7 @@ fun loadInputs(context: Context): List<TvApp> {
                 packageName = port.id,
                 label = device?.loadLabel(context)?.toString() ?: portLabel,
                 image = icon,
+                posterImage = icon,
                 hasBanner = false,
                 glow = INPUT_GLOW,
                 launchIntent = Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(port.id)),

@@ -16,12 +16,12 @@ Written up end to end here: [How I Debloated My Android TV and Built My Own Laun
 - **Apple TV-style look.** Like tvOS: the focused app's art fills the screen, with the clock, greeting, date, weather and quick settings above it. Focus is a lift and a glow in the app's colour (no thick borders). [Inter](https://rsms.me/inter/) font in text and display sizes, or any variable font you point it at.
 - **Your HDMI device first.** If something on HDMI names itself over CEC (an Apple TV, a console), it's the first tile of the top row, named big with an on/asleep status, and it has focus, so Home → OK takes you straight back to it.
 - **Top shelf for streaming apps** (needs a free TMDB key). Rest on Netflix, Prime Video, JioHotstar, Sony LIV or the Apple TV app and the screen fills with what's popular on it in your country right now: art, logo, genre, rating. Fetched in the background every 6 hours, only while the home screen is showing.
-- **Living wallpaper.** A different image for dawn, day, dusk and night that crossfades as the day goes on. It stays still: a slow drift made detailed photos shimmer. `launcher/tools/wallpapers.py` makes the set: AI art with an OpenAI key, or gradient placeholders.
+- **Living wallpaper and themes.** Built-in day/night scenes, five colour treatments, and downloadable landscape photos from Openverse's no-key, reuse-licensed catalogue, with creator/license credit. Optional slow, integer-pixel drift runs only while Home is visible. This is launcher motion, not a separately installed Android live-wallpaper service.
 - **The TV follows the Apple TV.** Turn the Apple TV off and the TV goes to sleep; turn the TV on and it opens the Apple TV's input (waking it). Needs a few adb grants, which `deploy.sh` does.
 - **Trending and streaming recommendations.** Popular movies and shows from [TMDB](https://www.themoviedb.org/) with full-screen art, title and rating. If the focused app has no supported catalogue, the launcher falls back to movies and shows TMDB marks free or ad-supported in the configured region; general trending remains the fallback if that catalogue is unavailable. It opens a matching installed service when possible (the app may still require an in-app search), or offers a YouTube/TizenTube title search; a search result is not a guarantee of full-length availability. Add a free TMDB API key in Launcher settings or at build time.
-- **Weather and “Continue in your apps.”** Current local weather appears in the header when location is available; the row opens your most recently used streaming apps. Streaming apps do not expose their exact playback title or progress to third-party launchers, so the app resumes from its own screen. Both features can be turned on or off in Launcher settings.
-- **Your apps, your order.** A favourites row, Continue in your apps row and an all-apps row (with a Launcher settings tile at the end); Down jumps straight to the next row. Long-press an app tile to **move it, add it to or remove it from favourites**, or open App info.
-- **Launcher settings.** The Settings tile and header button open launcher options for language (Spanish or English), TMDB key, weather, recent apps, streaming recommendations and OLED care, plus shortcuts to Wi-Fi, picture, sound and Android settings.
+- **Editable app rows.** Choose apps for Favourites, add/name/reorder extra streaming rows, and tune Continue in your apps with per-app exclusions and a 4–20 app limit. Continue still orders eligible apps by recent use; exact playback titles/progress remain private to each streaming app.
+- **Four home layouts.** Switch between the tvOS hero, poster-style app cards, compact rows and wallpaper-focused layouts from Launcher settings.
+- **Launcher settings.** Also includes language (Spanish or English), TMDB key, weather, streaming recommendations, OLED care, theme colour, wallpapers and shortcuts to Wi-Fi, picture, sound and Android settings.
 - **Easy recovery.** Flossing TV keeps its own named icon in the Android TV app list after it becomes the Home app. To remove it, choose **Uninstall Flossing TV** in Launcher settings; Android asks for confirmation and returns Home to the remaining launcher.
 - **HDMI inputs as tiles** on TVs, named after the connected device where the TV reports it (e.g. "Apple TV · HDMI 1"). Hidden on streaming boxes.
 - **OLED care**: pure black background, the layout drifts a few pixels every two minutes, and the screen dims after a minute of no input and 25% at night. Toggle it in Launcher settings for LCD TVs.
@@ -162,8 +162,9 @@ adb -s $S shell pm disable-user --user 0 com.google.android.tvlauncher
 
 ## Customise
 
-- **Favourites:** long-press a tile → Move / Add to favourites / Remove. The order is saved on the TV. The defaults for a fresh install are at the top of `Apps.kt`.
-- **Launcher settings:** open Settings from the home header or the end of All apps to switch Spanish/English, enter your TMDB key, or toggle weather, recent apps, recommendations and OLED care. The same screen keeps quick links to Wi-Fi, picture, sound and Android settings.
+- **App rows:** long-press to move or edit favourites; **Launcher settings → Manage app rows** lets you select apps, create/name/reorder rows. **Configure Continue in your apps** controls its limit and exclusions. These preferences stay on the TV.
+- **Layouts and wallpapers:** choose one of four layouts and a tint theme in Launcher settings. Browse the Openverse wallpaper catalogue by curated subject and select a landscape to download; the selected image and attribution are stored locally. The catalogue needs internet and may be rate-limited; Pinterest is not scraped, and external system live wallpapers do not run as this launcher's background.
+- **Launcher settings:** open Settings from the home header or the end of All apps to switch Spanish/English, enter your TMDB key, or toggle weather, recommendations and OLED care. The same screen keeps quick links to Wi-Fi, picture, sound and Android settings.
 - **Streaming apps for the trending button:** add TMDB provider ids and Android TV package names to `PROVIDER_APPS` in `Trending.kt`.
 - **Font:** set `ui.font=<path>` (and `ui.font.opsz=<text>,<display>`) in `local.properties` to use any variable font with `wght` and `opsz` axes; the default is `app/fonts/inter.ttf`.
 
@@ -195,6 +196,7 @@ You can also uninstall Flossing TV from **Launcher settings → Uninstall Flossi
 ## Credits
 
 - Movie and TV data and images from [TMDB](https://www.themoviedb.org/). This product uses the TMDB API but is not endorsed or certified by TMDB.
+- Downloadable photos are discovered via [Openverse](https://openverse.org/); each image displays its creator and license in Launcher settings.
 - Weather from [Open-Meteo](https://open-meteo.com/).
 - [Inter](https://rsms.me/inter/) by Rasmus Andersson, under the SIL Open Font License (`launcher/third_party/Inter-OFL.txt`).
 

@@ -45,13 +45,37 @@ fun dayPart(hour: Int): DayPart = when (hour) {
 class Wallpaper(val part: DayPart, val image: ImageBitmap, val frosted: ImageBitmap)
 
 // ~8 MB decoded; only held while the home screen is visible
-fun loadWallpaper(context: Context, part: DayPart): Wallpaper {
+fun loadWallpaper(context: Context, part: DayPart, theme: String = "midnight"): Wallpaper {
+    val tint = wallpaperTint(theme)
+    val custom = userWallpaperFile(context)
+    if (custom != null) {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(custom.absolutePath, bounds)
+        var sample = 1
+        while (bounds.outWidth / sample > 2560 || bounds.outHeight / sample > 1440) sample *= 2
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val bitmap = BitmapFactory.decodeFile(custom.absolutePath, options)
+            ?: throw IllegalStateException("Selected wallpaper could not be decoded")
+        return Wallpaper(part, bitmap.asImageBitmap(), frostedWallpaper(bitmap, ::scrimAlpha, tint))
+    }
     val options = BitmapFactory.Options().apply {
         inScaled = false
         inPreferredConfig = Bitmap.Config.ARGB_8888 // 565 bands on smooth skies
     }
     val bitmap = BitmapFactory.decodeResource(context.resources, part.image, options)
-    return Wallpaper(part, bitmap.asImageBitmap(), frostedWallpaper(bitmap, ::scrimAlpha))
+    return Wallpaper(part, bitmap.asImageBitmap(), frostedWallpaper(bitmap, ::scrimAlpha, tint))
+}
+
+private fun wallpaperTint(theme: String) = when (theme) {
+    "nature" -> Color(0xFF234A3B).copy(alpha = 0.12f)
+    "coast" -> Color(0xFF174B70).copy(alpha = 0.14f)
+    "city" -> Color(0xFF6B3B27).copy(alpha = 0.12f)
+    "space" -> Color(0xFF35205F).copy(alpha = 0.16f)
+    "architecture" -> Color(0xFF765F42).copy(alpha = 0.10f)
+    else -> Color.Transparent
 }
 
 // The darkening drawn over the wallpaper so text stays readable, as an alpha at a point (fractions of the screen):
@@ -71,30 +95,27 @@ fun scrimAlpha(x: Float, y: Float): Float {
     return 1f - (1f - left) * (1f - bottom) * (1f - top)
 }
 
-// Slow drift, off: the image is drawn larger and wanders inside that margin on two unrelated periods. Off because
-// sub-pixel steps make detailed photos (stars, snow, ripples) shimmer, and the enlargement softens them; still and
-// 1:1 is sharper and draws nothing while idle. DRIFT = true brings it back.
-private const val DRIFT = false
-private const val DRIFT_SCALE = 1.08f
-private const val DRIFT_X = 0.035f
-private const val DRIFT_Y = 0.03f
-private const val DRIFT_PERIOD_X_S = 240f
-private const val DRIFT_PERIOD_Y_S = 170f
-private const val DRIFT_TICK_MS = 250L
+// Optional integer-pixel drift keeps detailed photos sharp and avoids sub-pixel shimmer.
+private const val DRIFT_SCALE = 1.04f
+private const val DRIFT_X = 0.018f
+private const val DRIFT_Y = 0.015f
+private const val DRIFT_PERIOD_X_S = 300f
+private const val DRIFT_PERIOD_Y_S = 420f
+private const val DRIFT_TICK_MS = 20_000L
 
-/** Seconds since the home screen came up, ticking only while it is visible (and only if [DRIFT] is on). */
+/** Seconds since Home appeared, ticking only when ambient motion is enabled. */
 @Composable
-fun rememberDriftClock(visible: Boolean): State<Float> = produceState(0f, visible) {
+fun rememberDriftClock(visible: Boolean, ambient: Boolean): State<Float> = produceState(0f, visible, ambient) {
     val start = System.nanoTime()
-    while (DRIFT && visible) {
+    while (visible && ambient) {
         value = (System.nanoTime() - start) / 1e9f
         delay(DRIFT_TICK_MS)
     }
 }
 
 // Where the wallpaper sits on a screen of this size at time t. Glass uses it to line its blur up.
-fun wallpaperBounds(screen: Size, t: Float): Rect {
-    if (!DRIFT) return Rect(0f, 0f, screen.width, screen.height)
+fun wallpaperBounds(screen: Size, t: Float, ambient: Boolean = false): Rect {
+    if (!ambient) return Rect(0f, 0f, screen.width, screen.height)
     val w = screen.width * DRIFT_SCALE
     val h = screen.height * DRIFT_SCALE
     val dx = screen.width * DRIFT_X * sin(2 * PI.toFloat() * t / DRIFT_PERIOD_X_S)
@@ -109,20 +130,28 @@ fun wallpaperBounds(screen: Size, t: Float): Rect {
  * [dim] darkens it further (scrolling down the page). Draw-phase only: the drift never recomposes anything.
  */
 @Composable
-fun LivingWallpaper(wallpaper: Wallpaper?, clock: State<Float>, dim: () -> Float) {
+fun LivingWallpaper(
+    wallpaper: Wallpaper?,
+    clock: State<Float>,
+    dim: () -> Float,
+    ambient: Boolean,
+    theme: String,
+) {
     Crossfade(wallpaper, animationSpec = tween(1500), label = "wallpaper") { shown ->
         Box(
             Modifier
                 .fillMaxSize()
                 .drawBehind {
                     if (shown == null) return@drawBehind
-                    val bounds = wallpaperBounds(size, clock.value)
+                    val bounds = wallpaperBounds(size, clock.value, ambient)
                     drawImage(
                         shown.image,
                         dstOffset = IntOffset(bounds.left.roundToInt(), bounds.top.roundToInt()),
                         dstSize = IntSize(bounds.width.roundToInt(), bounds.height.roundToInt()),
                         filterQuality = FilterQuality.Low,
                     )
+                    val tint = wallpaperTint(theme)
+                    if (tint.alpha > 0f) drawRect(tint)
                     drawRect(Brush.horizontalGradient(0f to Color.Black.copy(alpha = SCRIM_LEFT), SCRIM_LEFT_END to Color.Transparent))
                     drawRect(Brush.verticalGradient(SCRIM_BOTTOM_START to Color.Transparent, 1f to Color.Black.copy(alpha = SCRIM_BOTTOM)))
                     drawRect(Brush.verticalGradient(0f to Color.Black.copy(alpha = SCRIM_TOP), SCRIM_TOP_END to Color.Transparent))

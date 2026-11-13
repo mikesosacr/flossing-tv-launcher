@@ -143,7 +143,6 @@ const val BACKDROP_HEIGHT_FRACTION = 1f
 private const val HERO_ROTATE_MS = 10_000L
 private const val TRENDING_REFRESH_MS = 6 * 60 * 60_000L
 private const val WEATHER_REFRESH_MS = 30 * 60_000L
-private const val RECENT_COUNT = 8
 // The first TLS handshake after start often fails (AdGuard's HTTPS filtering?); the retry works
 private const val TRENDING_RETRY_MS = 15_000L
 // Synthetic keys for generic feeds; provider-specific feeds are keyed by package name.
@@ -171,6 +170,15 @@ private data class MenuTarget(val app: TvApp, val canMove: Boolean)
 // The Settings tile at the end of All apps (Settings isn't a TV-launcher app on every TV)
 private const val SETTINGS_TILE = "settings"
 
+private data class ShelfLayout(val width: Dp, val height: Dp, val heroHeight: Dp, val poster: Boolean)
+
+private fun shelfLayout(id: String) = when (id) {
+    "posters" -> ShelfLayout(112.dp, 154.dp, 282.dp, true)
+    "compact" -> ShelfLayout(118.dp, 66.dp, 238.dp, false)
+    "minimal" -> ShelfLayout(144.dp, 80.dp, 230.dp, false)
+    else -> ShelfLayout(FavouriteTileWidth, FavouriteTileHeight, HeroAreaHeight, false)
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
@@ -196,6 +204,7 @@ fun HomeScreen(
     var apps by remember { mutableStateOf(emptyList<TvApp>()) }
     var launcherOptions by remember { mutableStateOf(loadLauncherOptions(context)) }
     var favouriteIds by remember { mutableStateOf(loadFavourites(context)) }
+    var customShelves by remember { mutableStateOf(loadCustomShelves(context)) }
     var recentIds by remember { mutableStateOf(emptyList<String>()) }
     var recentAccessMissing by remember { mutableStateOf(false) }
     var inputs by remember { mutableStateOf(emptyList<TvApp>()) }
@@ -204,6 +213,10 @@ fun HomeScreen(
     var menuBackdrop by remember { mutableStateOf<ImageBitmap?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
     var settingsBackdrop by remember { mutableStateOf<ImageBitmap?>(null) }
+    var shelfManagerOpen by remember { mutableStateOf(false) }
+    var continueManagerOpen by remember { mutableStateOf(false) }
+    var wallpaperPickerOpen by remember { mutableStateOf(false) }
+    var wallpaperReloadKey by remember { mutableIntStateOf(0) }
     var weather by remember { mutableStateOf<Weather?>(null) }
     var tmdbKey by remember { mutableStateOf(loadTmdbKey(context)) }
     var recommendationFailed by remember { mutableStateOf(false) }
@@ -233,11 +246,13 @@ fun HomeScreen(
     val inputsHead = remember { FocusRequester() }
     val recentHead = remember { FocusRequester() }
     val allAppsHead = remember { FocusRequester() }
+    val selectedLayout = shelfLayout(launcherOptions.layout)
     val settingsTile = remember(language) {
         TvApp(
             packageName = SETTINGS_TILE,
             label = context.getString(R.string.settings),
             image = ContextCompat.getDrawable(context, R.drawable.ic_settings)!!.toBitmap(96, 96).asImageBitmap(),
+            posterImage = ContextCompat.getDrawable(context, R.drawable.ic_settings)!!.toBitmap(96, 96).asImageBitmap(),
             hasBanner = false,
             glow = Color(0xFF4A5568),
             launchIntent = Intent(android.provider.Settings.ACTION_SETTINGS),
@@ -273,7 +288,22 @@ fun HomeScreen(
 
     val byPackage = remember(apps) { apps.associateBy { it.packageName } }
     val favourites = favouriteIds.mapNotNull { byPackage[it] }
-    val recents = recentIds.filter { it !in favouriteIds }.mapNotNull { byPackage[it] }.take(RECENT_COUNT)
+    val customPackageIds = customShelves.flatMap { it.packages }.toSet()
+    val recentEligible = recentIds
+        .filter { it !in favouriteIds && it !in customPackageIds && it !in launcherOptions.excludedRecentApps }
+    val prioritizedRecents = launcherOptions.prioritizedRecentApps
+        .filter { it !in launcherOptions.excludedRecentApps }
+    val recents = (prioritizedRecents + recentEligible.filterNot { it in prioritizedRecents })
+        .distinct()
+        .mapNotNull { byPackage[it] }
+        .take(launcherOptions.recentLimit)
+    val visibleCustomShelves = customShelves.mapNotNull { shelf ->
+        val rowApps = shelf.packages.mapNotNull { byPackage[it] }
+        shelf.takeIf { rowApps.isNotEmpty() }?.let { it to rowApps }
+    }
+    val customHeads = remember(visibleCustomShelves.map { it.first.id }) {
+        visibleCustomShelves.associate { (shelf, _) -> shelf.id to FocusRequester() }
+    }
     val hasRecentRow = recents.isNotEmpty() || recentAccessMissing
     // Moved apps first, in their saved order; the rest stay alphabetical (sortedBy is stable)
     val others = apps.filter { it.packageName !in favouriteIds }
@@ -448,10 +478,10 @@ fun HomeScreen(
     val networkLabel = rememberNetworkLabel()
     // Decoded only while the home screen is on screen; ~8 MB freed the moment an app or input takes over.
     // Not keyed on the titles: moving focus between apps must not decode it again.
-    val wallpaper by produceState<Wallpaper?>(null, visible, part) {
-        value = if (visible) withContext(Dispatchers.Default) { loadWallpaper(context, part) } else null
+    val wallpaper by produceState<Wallpaper?>(null, visible, part, wallpaperReloadKey, launcherOptions.theme) {
+        value = if (visible) withContext(Dispatchers.Default) { loadWallpaper(context, part, launcherOptions.theme) } else null
     }
-    val driftClock = rememberDriftClock(visible)
+    val driftClock = rememberDriftClock(visible, launcherOptions.ambientWallpaper)
     // Fades the wallpaper to black under an app's titles (read in the draw phase: no recomposition while it animates)
     val wallpaperCover = animateFloatAsState(if (hero != null) 1f else 0f, tween(1200), label = "cover")
     var keyPresses by remember { mutableIntStateOf(0) }
@@ -537,14 +567,18 @@ fun HomeScreen(
                 val screenSize = with(density) { Size(screenWidth, configuration.screenHeightDp.dp.toPx()) }
                 // Read in the draw phase so scrolling and fades only redraw
                 val wallpaperDim = { maxOf(wallpaperCover.value, 0.5f * (scroll.value / fadeDistance).coerceIn(0f, 1f)) }
-                LivingWallpaper(wallpaper, driftClock, wallpaperDim)
+                LivingWallpaper(wallpaper, driftClock, wallpaperDim, launcherOptions.ambientWallpaper, launcherOptions.theme)
                 Backdrop(hero?.let { decoded[heroIndex]?.backdrop }, backdropAlpha, parallax)
                 val glassSource = if (hero != null) {
                     val height = screenWidth * hero.frosted.height / hero.frosted.width
                     GlassSource(hero.frosted, { Rect(0f, -parallax, screenWidth, height - parallax) }, { backdropAlpha })
                 } else {
                     wallpaper?.let {
-                        GlassSource(it.frosted, { wallpaperBounds(screenSize, driftClock.value) }, { 1f - wallpaperDim() })
+                        GlassSource(
+                            it.frosted,
+                            { wallpaperBounds(screenSize, driftClock.value, launcherOptions.ambientWallpaper) },
+                            { 1f - wallpaperDim() },
+                        )
                     }
                 }
                 CompositionLocalProvider(LocalGlassSource provides glassSource) {
@@ -557,7 +591,7 @@ fun HomeScreen(
                     val movingHint = movingId?.let { id -> byPackage[id]?.label }
                         ?.let { stringResource(R.string.moving_hint, it) }
                     // Keep the original clock, date, greeting, network and quick settings above the hero.
-                    Box(Modifier.fillMaxWidth().height(HeroAreaHeight)) {
+                    Box(Modifier.fillMaxWidth().height(selectedLayout.heroHeight)) {
                         HomeHeader(
                             now = now,
                             weather = weather.takeIf { launcherOptions.showWeather },
@@ -609,27 +643,50 @@ fun HomeScreen(
                     val launchTile: (TvApp) -> Unit = {
                         if (it.packageName == SETTINGS_TILE) openSettings() else onLaunch(it)
                     }
-                    // Top row: the Apple TV first (OK opens it, which also wakes it over CEC), then favourites
+                    // The Apple TV stays first; favourites and custom shelves follow it.
                     val topRow = listOfNotNull(hdmiDevice) + favourites
                     // Where Down goes from each row (its first tile); All apps' first tile is firstTile when the top row is empty
                     val allAppsFirst = if (topRow.isEmpty()) firstTile else allAppsHead
-                    val belowInputs = if (hasRecentRow) recentHead else allAppsFirst
-                    val belowTop = if (otherInputs.isNotEmpty()) inputsHead else belowInputs
+                    val belowLastCustom = if (hasRecentRow) recentHead else allAppsFirst
+                    val firstCustom = visibleCustomShelves.firstOrNull()?.first?.id?.let(customHeads::get)
+                    val belowInputs = firstCustom ?: belowLastCustom
+                    val nextAfterTop = if (otherInputs.isNotEmpty()) inputsHead else firstCustom ?: belowLastCustom
                     Shelf(
                         topRow,
                         favouritesRow,
                         firstTile.takeIf { topRow.isNotEmpty() },
-                        onLaunch,
+                        launchTile,
                         { if (!it.isInput) openMenu(MenuTarget(it, canMove = true)) },
                         onFocused,
-                        FavouriteTileWidth,
-                        FavouriteTileHeight,
+                        selectedLayout.width,
+                        selectedLayout.height,
                         FavouriteTileShape,
-                        down = belowTop,
+                        posterMode = selectedLayout.poster,
+                        down = nextAfterTop,
                     )
                     if (otherInputs.isNotEmpty()) {
                         ShelfLabel(stringResource(R.string.inputs))
-                        Shelf(otherInputs, rememberLazyListState(), inputsHead, launchTile, {}, onFocused, down = belowInputs)
+                        Shelf(
+                            otherInputs, rememberLazyListState(), inputsHead, launchTile, {}, onFocused,
+                            selectedLayout.width, selectedLayout.height, posterMode = selectedLayout.poster, down = belowInputs,
+                        )
+                    }
+                    visibleCustomShelves.forEachIndexed { index, (shelf, rowApps) ->
+                        ShelfLabel(shelf.name)
+                        val next = visibleCustomShelves.getOrNull(index + 1)?.first?.id?.let(customHeads::get)
+                            ?: belowLastCustom
+                        Shelf(
+                            rowApps,
+                            rememberLazyListState(),
+                            customHeads[shelf.id],
+                            launchTile,
+                            { openMenu(MenuTarget(it, canMove = false)) },
+                            onFocused,
+                            selectedLayout.width,
+                            selectedLayout.height,
+                            posterMode = selectedLayout.poster,
+                            down = next,
+                        )
                     }
                     if (recents.isNotEmpty()) {
                         Column {
@@ -648,6 +705,9 @@ fun HomeScreen(
                             launchTile,
                             { openMenu(MenuTarget(it, canMove = false)) },
                             onFocused,
+                            selectedLayout.width,
+                            selectedLayout.height,
+                            posterMode = selectedLayout.poster,
                             down = allAppsFirst,
                         )
                     } else if (recentAccessMissing) {
@@ -680,6 +740,9 @@ fun HomeScreen(
                         launchTile,
                         { if (it.packageName != SETTINGS_TILE) openMenu(MenuTarget(it, canMove = true)) },
                         onFocused,
+                        selectedLayout.width,
+                        selectedLayout.height,
+                        posterMode = selectedLayout.poster,
                     )
                     Spacer(Modifier.height(40.dp))
                 }
@@ -728,6 +791,66 @@ fun HomeScreen(
                 onSoundSettings = onSoundSettings,
                 onAndroidSettings = onAndroidSettings,
                 onUninstall = onUninstall,
+                onManageRows = { settingsOpen = false; shelfManagerOpen = true },
+                onManageContinue = { settingsOpen = false; continueManagerOpen = true },
+                onBrowseWallpapers = { settingsOpen = false; wallpaperPickerOpen = true },
+            )
+        }
+        if (shelfManagerOpen) {
+            ShelfManagerDialog(
+                apps = apps,
+                favourites = favouriteIds,
+                shelves = customShelves,
+                backdrop = settingsBackdrop,
+                onDismiss = { shelfManagerOpen = false },
+                onFavouritesChange = ::updateFavourites,
+                onShelvesChange = {
+                    customShelves = it
+                    saveCustomShelves(context, it)
+                },
+            )
+        }
+        if (continueManagerOpen) {
+            ContinueManagerDialog(
+                apps = apps,
+                options = launcherOptions,
+                backdrop = settingsBackdrop,
+                onDismiss = { continueManagerOpen = false },
+                onOptionsChange = ::updateOptions,
+            )
+        }
+        if (wallpaperPickerOpen) {
+            WallpaperPickerDialog(
+                backdrop = settingsBackdrop,
+                selectedTheme = launcherOptions.theme,
+                onDismiss = { wallpaperPickerOpen = false },
+                onThemeSelected = { updateOptions(launcherOptions.copy(theme = it)) },
+                onReset = {
+                    try {
+                        clearUserWallpaper(context)
+                        wallpaperReloadKey++
+                        wallpaperPickerOpen = false
+                    } catch (e: java.io.IOException) {
+                        Log.w("WallpaperCatalog", "Could not reset wallpaper", e)
+                        android.widget.Toast.makeText(context, R.string.wallpaper_download_failed, android.widget.Toast.LENGTH_LONG).show()
+                    }
+                },
+                onSelect = { result ->
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) { downloadWallpaper(context, result) }
+                            wallpaperReloadKey++
+                            wallpaperPickerOpen = false
+                            android.widget.Toast.makeText(context, R.string.wallpaper_downloaded, android.widget.Toast.LENGTH_SHORT).show()
+                        } catch (e: java.io.IOException) {
+                            Log.w("WallpaperCatalog", "Wallpaper download failed", e)
+                            android.widget.Toast.makeText(context, R.string.wallpaper_download_failed, android.widget.Toast.LENGTH_LONG).show()
+                        } catch (e: org.json.JSONException) {
+                            Log.w("WallpaperCatalog", "Wallpaper response was invalid", e)
+                            android.widget.Toast.makeText(context, R.string.wallpaper_download_failed, android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
             )
         }
     }
@@ -987,7 +1110,11 @@ private fun LauncherSettingsDialog(
     onSoundSettings: () -> Unit,
     onAndroidSettings: () -> Unit,
     onUninstall: () -> Unit,
+    onManageRows: () -> Unit,
+    onManageContinue: () -> Unit,
+    onBrowseWallpapers: () -> Unit,
 ) {
+    val context = LocalContext.current
     val firstItem = remember { FocusRequester() }
     val tmdbFieldFocus = remember { FocusRequester() }
     val saveKeyFocus = remember { FocusRequester() }
@@ -1041,6 +1168,8 @@ private fun LauncherSettingsDialog(
                         Modifier.fillMaxWidth(),
                         fillWidth = true,
                     )
+                    Pill(null, stringResource(R.string.manage_continue), onManageContinue, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, stringResource(R.string.manage_app_rows), onManageRows, Modifier.fillMaxWidth(), fillWidth = true)
                     Pill(
                         null,
                         stringResource(R.string.recommendations_toggle, stringResource(if (options.showRecommendations) R.string.on else R.string.off)),
@@ -1069,6 +1198,74 @@ private fun LauncherSettingsDialog(
                         Modifier.fillMaxWidth(),
                         fillWidth = true,
                     )
+                    Text(
+                        stringResource(R.string.appearance),
+                        color = TextSecondary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+                    )
+                    listOf(
+                        "tvos" to R.string.layout_tvos,
+                        "posters" to R.string.layout_posters,
+                        "compact" to R.string.layout_compact,
+                        "minimal" to R.string.layout_minimal,
+                    ).forEach { (id, label) ->
+                        Pill(
+                            null,
+                            stringResource(label) + if (options.layout == id) "  ✓" else "",
+                            { onOptionsChange(options.copy(layout = id)) },
+                            Modifier.fillMaxWidth(),
+                            fillWidth = true,
+                        )
+                    }
+                    listOf(
+                        "midnight" to R.string.theme_midnight,
+                        "nature" to R.string.theme_nature,
+                        "coast" to R.string.theme_coast,
+                        "city" to R.string.theme_city,
+                        "space" to R.string.theme_space,
+                        "architecture" to R.string.theme_architecture,
+                    ).forEach { (id, label) ->
+                        Pill(
+                            null,
+                            stringResource(label) + if (options.theme == id) "  ✓" else "",
+                            { onOptionsChange(options.copy(theme = id)) },
+                            Modifier.fillMaxWidth(),
+                            fillWidth = true,
+                        )
+                    }
+                    Pill(null, stringResource(R.string.wallpaper_catalog), onBrowseWallpapers, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(
+                        null,
+                        stringResource(R.string.ambient_motion, stringResource(if (options.ambientWallpaper) R.string.on else R.string.off)),
+                        { onOptionsChange(options.copy(ambientWallpaper = !options.ambientWallpaper)) },
+                        Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                    Text(
+                        stringResource(R.string.ambient_motion_help),
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                    wallpaperCredit(context)?.let {
+                        Text(
+                            stringResource(R.string.wallpaper_credit, it),
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                    }
+                    wallpaperSource(context)?.let { source ->
+                        Pill(
+                            null,
+                            stringResource(R.string.open_wallpaper_source),
+                            { launch(context, Intent(Intent.ACTION_VIEW, Uri.parse(source))) },
+                            Modifier.fillMaxWidth(),
+                            fillWidth = true,
+                        )
+                    }
                     Text(
                         stringResource(R.string.tmdb_key_label),
                         color = TextSecondary,
@@ -1167,6 +1364,328 @@ private fun LauncherSettingsDialog(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ShelfManagerDialog(
+    apps: List<TvApp>,
+    favourites: List<String>,
+    shelves: List<CustomShelf>,
+    backdrop: ImageBitmap?,
+    onDismiss: () -> Unit,
+    onFavouritesChange: (List<String>) -> Unit,
+    onShelvesChange: (List<CustomShelf>) -> Unit,
+) {
+    val context = LocalContext.current
+    val firstItem = remember { FocusRequester() }
+    LaunchedEffect(Unit) { firstItem.requestFocusWhenAttached() }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val bounds = with(LocalDensity.current) { Rect(0f, 0f, maxWidth.toPx(), maxHeight.toPx()) }
+            if (backdrop != null) Image(backdrop, null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
+            CompositionLocalProvider(LocalGlassSource provides backdrop?.let { GlassSource(it, { bounds }) }) {
+                Column(
+                    Modifier.width(620.dp).heightIn(max = 680.dp).glass(MenuShape)
+                        .verticalScroll(rememberScrollState()).padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(stringResource(R.string.manage_app_rows), color = TextPrimary, fontSize = 24.sp, fontFamily = UiDisplay, fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.favourites), color = TextSecondary, fontSize = 16.sp, modifier = Modifier.padding(top = 8.dp))
+                    apps.forEachIndexed { index, app ->
+                        val selected = app.packageName in favourites
+                        Pill(
+                            null,
+                            (if (selected) "✓  " else "+  ") + app.label,
+                            {
+                                onFavouritesChange(
+                                    if (selected) favourites - app.packageName else favourites + app.packageName,
+                                )
+                            },
+                            Modifier.fillMaxWidth().then(if (index == 0) Modifier.focusRequester(firstItem) else Modifier),
+                            fillWidth = true,
+                        )
+                    }
+                    shelves.forEach { shelf ->
+                        var rowName by remember(shelf.id, shelf.name) { mutableStateOf(shelf.name) }
+                        BasicTextField(
+                            value = rowName,
+                            onValueChange = { name ->
+                                rowName = name
+                                onShelvesChange(shelves.map { if (it.id == shelf.id) it.copy(name = name) else it })
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                                .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(color = TextPrimary, fontSize = 16.sp),
+                        )
+                        val rowIndex = shelves.indexOfFirst { it.id == shelf.id }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (rowIndex > 0) {
+                                Pill(null, stringResource(R.string.move_row_up), {
+                                    onShelvesChange(shelves.toMutableList().apply { add(rowIndex - 1, removeAt(rowIndex)) })
+                                }, Modifier.weight(1f), fillWidth = true)
+                            }
+                            if (rowIndex < shelves.lastIndex) {
+                                Pill(null, stringResource(R.string.move_row_down), {
+                                    onShelvesChange(shelves.toMutableList().apply { add(rowIndex + 1, removeAt(rowIndex)) })
+                                }, Modifier.weight(1f), fillWidth = true)
+                            }
+                        }
+                        Pill(
+                            null,
+                            stringResource(R.string.remove_app_row),
+                            { onShelvesChange(shelves.filterNot { it.id == shelf.id }) },
+                            Modifier.fillMaxWidth(),
+                            fillWidth = true,
+                        )
+                        Text(stringResource(R.string.choose_apps), color = TextSecondary, fontSize = 13.sp)
+                        apps.forEach { app ->
+                            val selected = app.packageName in shelf.packages
+                            Pill(
+                                null,
+                                (if (selected) "✓  " else "+  ") + app.label,
+                                {
+                                    onShelvesChange(
+                                        shelves.map {
+                                            if (it.id != shelf.id) it else it.copy(
+                                                packages = if (selected) it.packages - app.packageName
+                                                else it.packages + app.packageName,
+                                            )
+                                        },
+                                    )
+                                },
+                                Modifier.fillMaxWidth(),
+                                fillWidth = true,
+                            )
+                        }
+                    }
+                    Pill(
+                        null,
+                        stringResource(R.string.add_app_row),
+                        {
+                            val number = shelves.size + 1
+                            onShelvesChange(
+                                shelves + CustomShelf(
+                                    id = "shelf-${System.currentTimeMillis()}",
+                                    name = context.getString(R.string.app_row_title, number),
+                                    packages = emptyList(),
+                                ),
+                            )
+                        },
+                        Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                    Pill(null, stringResource(R.string.cancel), onDismiss, Modifier.fillMaxWidth(), fillWidth = true)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContinueManagerDialog(
+    apps: List<TvApp>,
+    options: LauncherOptions,
+    backdrop: ImageBitmap?,
+    onDismiss: () -> Unit,
+    onOptionsChange: (LauncherOptions) -> Unit,
+) {
+    val firstItem = remember { FocusRequester() }
+    LaunchedEffect(Unit) { firstItem.requestFocusWhenAttached() }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val bounds = with(LocalDensity.current) { Rect(0f, 0f, maxWidth.toPx(), maxHeight.toPx()) }
+            if (backdrop != null) Image(backdrop, null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
+            CompositionLocalProvider(LocalGlassSource provides backdrop?.let { GlassSource(it, { bounds }) }) {
+                Column(
+                    Modifier.width(560.dp).heightIn(max = 680.dp).glass(MenuShape)
+                        .verticalScroll(rememberScrollState()).padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(stringResource(R.string.manage_continue), color = TextPrimary, fontSize = 24.sp, fontFamily = UiDisplay, fontWeight = FontWeight.SemiBold)
+                    listOf(4, 8, 12, 20).forEachIndexed { index, count ->
+                        Pill(
+                            null,
+                            stringResource(R.string.recent_limit, count) + if (options.recentLimit == count) "  ✓" else "",
+                            { onOptionsChange(options.copy(recentLimit = count)) },
+                            Modifier.fillMaxWidth().then(if (index == 0) Modifier.focusRequester(firstItem) else Modifier),
+                            fillWidth = true,
+                        )
+                    }
+                    val prioritized = options.prioritizedRecentApps.mapNotNull { pkg ->
+                        apps.firstOrNull { it.packageName == pkg }?.let { pkg to it.label }
+                    }
+                    if (prioritized.isNotEmpty()) {
+                        Text(stringResource(R.string.continue_priority), color = TextSecondary, fontSize = 15.sp, modifier = Modifier.padding(top = 8.dp))
+                        prioritized.forEachIndexed { index, (packageName, label) ->
+                            val storedIndex = options.prioritizedRecentApps.indexOf(packageName)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${index + 1}. $label", color = TextPrimary, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (storedIndex > 0) {
+                                    Pill(null, stringResource(R.string.move_app_up), {
+                                        val reordered = options.prioritizedRecentApps.toMutableList()
+                                        reordered.add(storedIndex - 1, reordered.removeAt(storedIndex))
+                                        onOptionsChange(options.copy(prioritizedRecentApps = reordered))
+                                    })
+                                }
+                                if (storedIndex < options.prioritizedRecentApps.lastIndex) {
+                                    Pill(null, stringResource(R.string.move_app_down), {
+                                        val reordered = options.prioritizedRecentApps.toMutableList()
+                                        reordered.add(storedIndex + 1, reordered.removeAt(storedIndex))
+                                        onOptionsChange(options.copy(prioritizedRecentApps = reordered))
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    Text(stringResource(R.string.choose_apps), color = TextSecondary, fontSize = 15.sp, modifier = Modifier.padding(top = 8.dp))
+                    apps.forEach { app ->
+                        val included = app.packageName !in options.excludedRecentApps
+                        val prioritizedApp = app.packageName in options.prioritizedRecentApps
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Pill(
+                                null,
+                                stringResource(if (included) R.string.continue_included else R.string.continue_excluded, app.label),
+                                {
+                                    val excluded = if (included) options.excludedRecentApps + app.packageName
+                                    else options.excludedRecentApps - app.packageName
+                                    onOptionsChange(options.copy(excludedRecentApps = excluded))
+                                },
+                                Modifier.weight(1f),
+                                fillWidth = true,
+                            )
+                            Pill(
+                                null,
+                                stringResource(
+                                    if (prioritizedApp) R.string.continue_prioritized else R.string.prioritize_continue,
+                                    app.label,
+                                ),
+                                {
+                                    val priority = if (prioritizedApp) options.prioritizedRecentApps - app.packageName
+                                    else options.prioritizedRecentApps + app.packageName
+                                    onOptionsChange(options.copy(prioritizedRecentApps = priority))
+                                },
+                                Modifier.weight(1f),
+                                fillWidth = true,
+                            )
+                        }
+                    }
+                    Pill(null, stringResource(R.string.cancel), onDismiss, Modifier.fillMaxWidth(), fillWidth = true)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WallpaperPickerDialog(
+    backdrop: ImageBitmap?,
+    selectedTheme: String,
+    onDismiss: () -> Unit,
+    onThemeSelected: (String) -> Unit,
+    onReset: () -> Unit,
+    onSelect: (WallpaperResult) -> Unit,
+) {
+    var selected by remember(selectedTheme) {
+        mutableStateOf(WALLPAPER_THEMES.firstOrNull { it.id == selectedTheme } ?: WALLPAPER_THEMES.first())
+    }
+    var results by remember { mutableStateOf(emptyList<WallpaperResult>()) }
+    var loading by remember { mutableStateOf(true) }
+    var failed by remember { mutableStateOf(false) }
+    LaunchedEffect(selected) {
+        loading = true
+        failed = false
+        try {
+            results = withContext(Dispatchers.IO) { searchWallpapers(selected) }
+        } catch (e: java.io.IOException) {
+            Log.w("WallpaperCatalog", "Openverse search failed", e)
+            failed = true
+            results = emptyList()
+        } catch (e: org.json.JSONException) {
+            Log.w("WallpaperCatalog", "Openverse returned an invalid response", e)
+            failed = true
+            results = emptyList()
+        } finally {
+            loading = false
+        }
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val bounds = with(LocalDensity.current) { Rect(0f, 0f, maxWidth.toPx(), maxHeight.toPx()) }
+            if (backdrop != null) Image(backdrop, null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
+            CompositionLocalProvider(LocalGlassSource provides backdrop?.let { GlassSource(it, { bounds }) }) {
+                Column(
+                    Modifier.width(680.dp).heightIn(max = 700.dp).glass(MenuShape)
+                        .verticalScroll(rememberScrollState()).padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(9.dp),
+                ) {
+                    Text(stringResource(R.string.wallpaper_catalog), color = TextPrimary, fontSize = 24.sp, fontFamily = UiDisplay, fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.wallpaper_license_note), color = TextSecondary, fontSize = 13.sp)
+                    WALLPAPER_THEMES.forEach { theme ->
+                        Pill(
+                            null,
+                            stringResource(theme.titleRes) + if (selected.id == theme.id) "  ✓" else "",
+                            {
+                                selected = theme
+                                onThemeSelected(theme.id)
+                            },
+                            Modifier.fillMaxWidth(),
+                            fillWidth = true,
+                        )
+                    }
+                    when {
+                        loading -> Text(stringResource(R.string.wallpaper_searching), color = TextSecondary)
+                        failed -> Text(stringResource(R.string.recommendations_unavailable), color = TextSecondary)
+                        results.isEmpty() -> Text(stringResource(R.string.wallpaper_empty), color = TextSecondary)
+                        else -> results.forEach { result ->
+                            WallpaperChoice(result, onSelect)
+                        }
+                    }
+                    Pill(null, stringResource(R.string.wallpaper_reset), onReset, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, stringResource(R.string.cancel), onDismiss, Modifier.fillMaxWidth(), fillWidth = true)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WallpaperChoice(result: WallpaperResult, onSelect: (WallpaperResult) -> Unit) {
+    var preview by remember(result.thumbnailUrl) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(result.thumbnailUrl) {
+        try {
+            val bytes = withContext(Dispatchers.IO) { httpBytes(result.thumbnailUrl) }
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 288) sample *= 2
+            preview = android.graphics.BitmapFactory.decodeByteArray(
+                bytes,
+                0,
+                bytes.size,
+                android.graphics.BitmapFactory.Options().apply {
+                    inSampleSize = sample
+                    inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+                },
+            )?.asImageBitmap()
+        } catch (e: java.io.IOException) {
+            Log.w("WallpaperCatalog", "Wallpaper preview failed", e)
+        }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        preview?.let { Image(it, result.title, contentScale = ContentScale.Crop, modifier = Modifier.width(144.dp).height(82.dp).clip(RoundedCornerShape(10.dp))) }
+        Pill(
+            null,
+            "${result.title} - ${result.creator} (${result.license})",
+            { onSelect(result) },
+            Modifier.weight(1f),
+            fillWidth = true,
+        )
     }
 }
 
@@ -1349,6 +1868,7 @@ private fun Shelf(
     tileWidth: Dp = TileWidth,
     tileHeight: Dp = TileHeight,
     shape: RoundedCornerShape = TileShape,
+    posterMode: Boolean = false,
     // Where Down goes from any tile in this row (the next row's first tile)
     down: FocusRequester? = null,
 ) {
@@ -1369,6 +1889,7 @@ private fun Shelf(
                 width = tileWidth,
                 height = tileHeight,
                 shape = shape,
+                posterMode = posterMode,
                 modifier = Modifier
                     .then(if (down != null) Modifier.focusProperties { this.down = down } else Modifier)
                     .then(if (requester != null) Modifier.focusRequester(requester) else Modifier)
@@ -1387,6 +1908,7 @@ private fun AppTile(
     width: Dp,
     height: Dp,
     shape: RoundedCornerShape,
+    posterMode: Boolean,
     modifier: Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -1418,6 +1940,7 @@ private fun AppTile(
         Box(
             Modifier
                 .fillMaxSize()
+                .background(if (posterMode) app.glow.copy(alpha = 0.22f) else Color.Transparent)
                 .drawWithContent {
                     drawContent()
                     // Soft glare from the top-left while focused, plus a band that sweeps across once
@@ -1443,7 +1966,28 @@ private fun AppTile(
                     }
                 }
         ) {
-            if (app.hasBanner) {
+            if (posterMode) {
+                Image(
+                    app.posterImage,
+                    contentDescription = app.label,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(14.dp),
+                )
+                Box(
+                    Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))))
+                        .padding(horizontal = 8.dp, vertical = 7.dp),
+                ) {
+                    Text(
+                        app.label,
+                        color = TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            } else if (app.hasBanner) {
                 Image(app.image, contentDescription = app.label, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             } else {
                 GlassTileContent(app, shape)
