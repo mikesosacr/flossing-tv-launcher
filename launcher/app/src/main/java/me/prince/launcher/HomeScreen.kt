@@ -1,6 +1,7 @@
 package me.prince.launcher
 
 import android.content.Context
+import android.net.Uri
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.graphics.ImageBitmap
