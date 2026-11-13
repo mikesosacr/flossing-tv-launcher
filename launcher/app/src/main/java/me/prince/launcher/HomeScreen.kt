@@ -187,6 +187,7 @@ fun HomeScreen(
     onPictureSettings: () -> Unit,
     onSoundSettings: () -> Unit,
     onAndroidSettings: () -> Unit,
+    onUninstall: () -> Unit,
     onOpenTrending: (Intent) -> Unit,
 ) {
     val context = LocalContext.current
@@ -722,6 +723,7 @@ fun HomeScreen(
                 onPictureSettings = onPictureSettings,
                 onSoundSettings = onSoundSettings,
                 onAndroidSettings = onAndroidSettings,
+                onUninstall = onUninstall,
             )
         }
     }
@@ -980,6 +982,7 @@ private fun LauncherSettingsDialog(
     onPictureSettings: () -> Unit,
     onSoundSettings: () -> Unit,
     onAndroidSettings: () -> Unit,
+    onUninstall: () -> Unit,
 ) {
     val firstItem = remember { FocusRequester() }
     val tmdbFieldFocus = remember { FocusRequester() }
@@ -1156,6 +1159,7 @@ private fun LauncherSettingsDialog(
                     Pill(null, stringResource(R.string.picture_settings), onPictureSettings, Modifier.fillMaxWidth(), fillWidth = true)
                     Pill(null, stringResource(R.string.sound_settings), onSoundSettings, Modifier.fillMaxWidth(), fillWidth = true)
                     Pill(null, stringResource(R.string.android_settings), onAndroidSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, stringResource(R.string.uninstall_launcher), onUninstall, Modifier.fillMaxWidth(), fillWidth = true)
                 }
             }
         }

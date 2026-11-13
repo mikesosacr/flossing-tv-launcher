@@ -22,6 +22,7 @@ Written up end to end here: [How I Debloated My Android TV and Built My Own Laun
 - **Weather and “Continue in your apps.”** Current local weather appears in the header when location is available; the row opens your most recently used streaming apps. Streaming apps do not expose their exact playback title or progress to third-party launchers, so the app resumes from its own screen. Both features can be turned on or off in Launcher settings.
 - **Your apps, your order.** A favourites row, Continue in your apps row and an all-apps row (with a Launcher settings tile at the end); Down jumps straight to the next row. Long-press an app tile to **move it, add it to or remove it from favourites**, or open App info.
 - **Launcher settings.** The Settings tile and header button open launcher options for language (Spanish or English), TMDB key, weather, recent apps, streaming recommendations and OLED care, plus shortcuts to Wi-Fi, picture, sound and Android settings.
+- **Easy recovery.** Flossing TV keeps its own named icon in the Android TV app list after it becomes the Home app. To remove it, choose **Uninstall Flossing TV** in Launcher settings; Android asks for confirmation and returns Home to the remaining launcher.
 - **HDMI inputs as tiles** on TVs, named after the connected device where the TV reports it (e.g. "Apple TV · HDMI 1"). Hidden on streaming boxes.
 - **OLED care**: pure black background, the layout drifts a few pixels every two minutes, and the screen dims after a minute of no input and 25% at night. Toggle it in Launcher settings for LCD TVs.
 
@@ -176,6 +177,8 @@ adb -s <tv-ip>:5555 uninstall me.prince.launcher
 ```
 
 If the TV ever shows a black screen on Home, `adb -s <tv-ip>:5555 shell pm enable com.google.android.tvlauncher` brings the stock launcher back.
+
+You can also uninstall Flossing TV from **Launcher settings → Uninstall Flossing TV**, or from Android **Settings → Apps**.
 
 ## Gotchas
 

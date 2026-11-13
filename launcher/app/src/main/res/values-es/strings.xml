@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_name">Flossing TV</string>
     <string name="tv_power_service_label">El TV sigue la energía del Apple TV</string>
     <string name="tv_power_service_description">Apaga el televisor cuando el dispositivo HDMI (por ejemplo, Apple TV) entra en reposo y abre su entrada al encender el TV.</string>
     <string name="settings">Ajustes</string>
@@ -14,6 +15,11 @@
     <string name="picture_settings">Ajustes de imagen</string>
     <string name="sound_settings">Ajustes de sonido</string>
     <string name="android_settings">Ajustes de Android</string>
+    <string name="uninstall_launcher">Desinstalar Flossing TV</string>
+    <string name="uninstall_confirm_title">¿Desinstalar el launcher?</string>
+    <string name="uninstall_confirm_message">Esto quitará Flossing TV del televisor. No se eliminarán tus otras apps ni sus datos.</string>
+    <string name="cancel">Cancelar</string>
+    <string name="uninstall">Desinstalar</string>
     <string name="language_label">Idioma: %1$s</string>
     <string name="spanish">Español</string>
     <string name="english">Inglés</string>

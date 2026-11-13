@@ -90,6 +90,9 @@ class MainActivity : ComponentActivity() {
                     onPictureSettings = { launch(this, pictureSettings()) },
                     onSoundSettings = { launch(this, Intent(Settings.ACTION_SOUND_SETTINGS)) },
                     onAndroidSettings = { launch(this, Intent(Settings.ACTION_SETTINGS)) },
+                    onUninstall = {
+                        launch(this, Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName")))
+                    },
                     // Stremio title links only work on a cold start; plain app launches don't need that
                     onOpenTrending = { if (it.data != null) launchFresh(this, it) else launch(this, it) },
                 )
