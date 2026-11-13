@@ -69,6 +69,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -98,10 +100,12 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -978,7 +982,11 @@ private fun LauncherSettingsDialog(
     onAndroidSettings: () -> Unit,
 ) {
     val firstItem = remember { FocusRequester() }
+    val tmdbFieldFocus = remember { FocusRequester() }
+    val saveKeyFocus = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
     var draftKey by remember(tmdbKey) { mutableStateOf(tmdbKey) }
+    var tmdbFieldFocused by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { firstItem.requestFocusWhenAttached() }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1071,13 +1079,40 @@ private fun LauncherSettingsDialog(
                         value = draftKey,
                         onValueChange = { draftKey = it },
                         modifier = Modifier
+                            .focusRequester(tmdbFieldFocus)
+                            .focusProperties { down = saveKeyFocus }
+                            .onFocusChanged { tmdbFieldFocused = it.isFocused }
+                            .onPreviewKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                                    keyboardController?.hide()
+                                    saveKeyFocus.requestFocus()
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
                             .fillMaxWidth()
                             .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(14.dp))
+                            .border(
+                                width = if (tmdbFieldFocused) 2.dp else 1.dp,
+                                color = if (tmdbFieldFocused) Color.White else Color.White.copy(alpha = 0.18f),
+                                shape = RoundedCornerShape(14.dp),
+                            )
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         singleLine = true,
                         textStyle = LocalTextStyle.current.copy(color = TextPrimary, fontSize = 16.sp),
                         cursorBrush = SolidColor(Color.White),
-                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Ascii,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                keyboardController?.hide()
+                                onSaveTmdbKey(draftKey)
+                                onDismiss()
+                            },
+                        ),
                         decorationBox = { innerTextField ->
                             Box {
                                 if (draftKey.isEmpty()) {
@@ -1091,8 +1126,12 @@ private fun LauncherSettingsDialog(
                         Pill(
                             null,
                             stringResource(R.string.save),
-                            { onSaveTmdbKey(draftKey) },
-                            Modifier.weight(1f),
+                            {
+                                keyboardController?.hide()
+                                onSaveTmdbKey(draftKey)
+                                onDismiss()
+                            },
+                            Modifier.weight(1f).focusRequester(saveKeyFocus),
                             fillWidth = true,
                         )
                         Pill(
