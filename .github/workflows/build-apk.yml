@@ -2,7 +2,10 @@ name: Build Android TV APK
 
 on:
   push:
-    branches: [main]
+    paths:
+      - "launcher/**"
+      - ".github/workflows/build-apk.yml"
+  pull_request:
     paths:
       - "launcher/**"
       - ".github/workflows/build-apk.yml"
@@ -11,39 +14,54 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build release APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            launcher/**/*.gradle*
+            launcher/**/gradle-wrapper.properties
+            launcher/gradle/libs.versions.toml
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
+          accept-android-sdk-licenses: true
 
       - name: Configure launcher
         working-directory: launcher
         env:
           TMDB_KEY: ${{ secrets.TMDB_KEY }}
           TMDB_REGION: ${{ vars.TMDB_REGION }}
+        shell: bash
         run: |
-          cat > local.properties <<EOF
-          sdk.dir=${ANDROID_HOME}
-          tmdb.key=${TMDB_KEY}
-          tmdb.region=${TMDB_REGION}
-          tmdb.feed=all
-          EOF
+          {
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+            printf 'tmdb.key=%s\n' "$TMDB_KEY"
+            printf 'tmdb.region=%s\n' "$TMDB_REGION"
+            printf 'tmdb.feed=all\n'
+          } > local.properties
 
       - name: Build release APK
         working-directory: launcher
-        run: ./gradlew --no-daemon assembleRelease
+        run: ./gradlew --no-daemon --stacktrace assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
