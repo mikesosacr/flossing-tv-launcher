@@ -146,8 +146,9 @@ private const val WEATHER_REFRESH_MS = 30 * 60_000L
 private const val RECENT_COUNT = 8
 // The first TLS handshake after start often fails (AdGuard's HTTPS filtering?); the retry works
 private const val TRENDING_RETRY_MS = 15_000L
-// Feed key for this week's trending (the other feeds are keyed by package name)
+// Synthetic keys for generic feeds; provider-specific feeds are keyed by package name.
 private const val TRENDING_FEED = "trending"
+private const val FREE_FEED = "free"
 // Focus has to rest on a tile this long before the top of the screen follows it
 private const val SHELF_SETTLE_MS = 300L
 private val TileShape = RoundedCornerShape(14.dp)
@@ -339,14 +340,14 @@ fun HomeScreen(
     val shownApp = focusedApp ?: favourites.firstOrNull() ?: others.firstOrNull()
     val glow by animateColorAsState(shownApp?.glow ?: Background, tween(600), label = "glow")
 
-    // Titles for the top of the screen: each supported app's popular titles, with general trending as a fallback.
+    // Titles for the top of the screen: app-specific picks, then regional free picks, then general trending.
     // Refreshed every 6 h, in the background, only while Home is on screen; moving focus only picks fetched titles.
     val feeds = remember { mutableStateMapOf<String, List<TrendingTitle>>() }
     val nextFetch = remember { mutableMapOf<String, Long>() }
     val failures = remember { mutableMapOf<String, Int>() }
     val feedKeys = if (launcherOptions.showRecommendations) {
         apps.map { it.packageName }.filter { it in TOP_SHELF_PROVIDERS } +
-            listOf(TRENDING_FEED)
+            listOf(FREE_FEED, TRENDING_FEED)
     } else {
         emptyList()
     }
@@ -367,6 +368,8 @@ fun HomeScreen(
                     val contentLanguage = if (language == "es") "es-ES" else "en-US"
                     if (feed == TRENDING_FEED) {
                         fetchTrending(context, tmdbKey, contentLanguage)
+                    } else if (feed == FREE_FEED) {
+                        fetchFreeRecommendations(context, tmdbKey, contentLanguage)
                     } else {
                         fetchTopShelf(context, feed, byPackage[feed]?.label.orEmpty(), tmdbKey, contentLanguage)
                     }
@@ -398,8 +401,9 @@ fun HomeScreen(
         shelfApp = focusedApp
     }
     val shelfTitles = if (launcherOptions.showRecommendations) shelfApp?.let { feeds[it.packageName] }.orEmpty() else emptyList()
+    val freeTitles = if (launcherOptions.showRecommendations) feeds[FREE_FEED].orEmpty() else emptyList()
     val heroTitles = if (launcherOptions.showRecommendations) {
-        shelfTitles.ifEmpty { feeds[TRENDING_FEED].orEmpty() }
+        shelfTitles.ifEmpty { freeTitles.ifEmpty { feeds[TRENDING_FEED].orEmpty() } }
     } else {
         emptyList()
     }
@@ -409,10 +413,10 @@ fun HomeScreen(
         recommendationFailed -> stringResource(R.string.recommendations_unavailable)
         else -> stringResource(R.string.loading_recommendations)
     }
-    val heroLabel = if (shelfTitles.isNotEmpty()) {
-        stringResource(R.string.top_on, shelfApp?.label.orEmpty())
-    } else {
-        stringResource(R.string.trending_this_week)
+    val heroLabel = when {
+        shelfTitles.isNotEmpty() -> stringResource(R.string.top_on, shelfApp?.label.orEmpty())
+        freeTitles.isNotEmpty() -> stringResource(R.string.free_streaming_picks)
+        else -> stringResource(R.string.trending_this_week)
     }
     var heroIndex by remember(heroTitles) { mutableIntStateOf(0) }
     var heroFocused by remember { mutableStateOf(false) }

@@ -94,6 +94,7 @@ private fun toTitle(
     language: String,
     item: JSONObject,
     opens: Pair<Intent?, String?>? = null,
+    youtubeSearchIfUnavailable: Boolean = false,
 ): TrendingTitle {
     val type = item.getString("media_type")
     val append = if (opens == null) "external_ids,watch/providers,images" else "images"
@@ -118,7 +119,7 @@ private fun toTitle(
         ?.optString("file_path")
     val logoPng = logoPath?.let { httpBytes("$IMAGES/w500$it") }?.takeIf { isLightEnough(decode(it)) }
 
-    val (action, label) = opens ?: watchAction(context, type, details)
+    val (action, label) = opens ?: watchAction(context, type, details, title, youtubeSearchIfUnavailable)
     val backdropJpeg = httpBytes("$IMAGES/w1280${item.getString("backdrop_path")}")
     return TrendingTitle(
         title = title,
@@ -132,18 +133,30 @@ private fun toTitle(
     )
 }
 
-// An installed app that streams it in your region, else Stremio's page for it (if Stremio is installed)
-private fun watchAction(context: Context, type: String, details: JSONObject): Pair<Intent?, String?> {
+// Prefer a matching in-region provider; the free feed may search YouTube when no provider app is identifiable.
+private fun watchAction(
+    context: Context,
+    type: String,
+    details: JSONObject,
+    title: String,
+    youtubeSearchIfUnavailable: Boolean,
+): Pair<Intent?, String?> {
     val pm = context.packageManager
-    val providers = details.optJSONObject("watch/providers")?.optJSONObject("results")
-        ?.optJSONObject(REGION)?.optJSONArray("flatrate")?.objects().orEmpty()
+    val regionProviders = details.optJSONObject("watch/providers")?.optJSONObject("results")
+        ?.optJSONObject(REGION)
+    val providers = listOf("free", "ads", "flatrate")
+        .flatMap { regionProviders?.optJSONArray(it)?.objects().orEmpty() }
     for (provider in providers) {
-        val pkg = PROVIDER_APPS[provider.optInt("provider_id")] ?: continue
-        val launch = pm.getLeanbackLaunchIntentForPackage(pkg) ?: continue
-        return launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to context.getString(
-            R.string.watch_on,
-            provider.optString("provider_name"),
-        )
+        val name = provider.optString("provider_name")
+        val pkg = PROVIDER_APPS[provider.optInt("provider_id")]
+        val launch = pkg?.let { pm.getLeanbackLaunchIntentForPackage(it) }
+            ?: providerLaunchIntent(context, name)
+        if (launch != null) {
+            return launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to context.getString(R.string.watch_on, name)
+        }
+    }
+    if (youtubeSearchIfUnavailable) {
+        youtubeSearchIntent(context, title)?.let { (intent, label) -> return intent to label }
     }
     val imdb = details.optJSONObject("external_ids")?.optString("imdb_id").orEmpty()
     if (imdb.isBlank() || pm.getLeanbackLaunchIntentForPackage(STREMIO) == null) return null to null
@@ -152,6 +165,52 @@ private fun watchAction(context: Context, type: String, details: JSONObject): Pa
         .setPackage(STREMIO)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to context.getString(R.string.open_in_stremio)
 }
+
+private fun providerLaunchIntent(context: Context, providerName: String): Intent? {
+    val provider = providerName.normalizedServiceName()
+    if (provider.length < 4) return null
+    val pm = context.packageManager
+    val leanback = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
+    val app = pm.queryIntentActivities(leanback, 0)
+        .distinctBy { it.activityInfo.packageName }
+        .firstOrNull { info ->
+            val label = info.loadLabel(pm).toString().normalizedServiceName()
+            label.length >= 4 && (label == provider || label.startsWith(provider) || provider.startsWith(label))
+        } ?: return null
+    return pm.getLeanbackLaunchIntentForPackage(app.activityInfo.packageName)
+}
+
+private fun youtubeSearchIntent(context: Context, title: String): Pair<Intent, String>? {
+    val pm = context.packageManager
+    val leanback = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
+    val apps = pm.queryIntentActivities(leanback, 0).distinctBy { it.activityInfo.packageName }
+    val app = apps.firstOrNull {
+        it.loadLabel(pm).toString().contains("YouTube", ignoreCase = true)
+    } ?: apps.firstOrNull {
+        val label = it.loadLabel(pm).toString()
+        label.contains("Tizen", ignoreCase = true) && label.contains("Tube", ignoreCase = true)
+    } ?: return null
+    val packageName = app.activityInfo.packageName
+    val webSearch = Intent(
+        Intent.ACTION_VIEW,
+        Uri.parse("https://www.youtube.com/results?search_query=${Uri.encode(title)}"),
+    ).setPackage(packageName)
+    val search = Intent(Intent.ACTION_SEARCH)
+        .setPackage(packageName)
+        .putExtra(android.app.SearchManager.QUERY, title)
+    val intent = when {
+        webSearch.resolveActivity(pm) != null -> webSearch
+        search.resolveActivity(pm) != null -> search
+        else -> return null
+    }
+    return intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to context.getString(
+        R.string.search_on_app,
+        app.loadLabel(pm).toString(),
+    )
+}
+
+private fun String.normalizedServiceName(): String =
+    lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
 
 fun TrendingTitle.decodeBackdrop(): ImageBitmap = decode(backdropJpeg).asImageBitmap()
 fun TrendingTitle.decodeLogo(): ImageBitmap? = logoPng?.let { decode(it).asImageBitmap() }
@@ -189,38 +248,91 @@ fun fetchTopShelf(
     val today = java.time.LocalDate.now()
     val common = "watch_region=$REGION&with_watch_providers=${Uri.encode(providers)}&with_watch_monetization_types=flatrate" +
         "&sort_by=popularity.desc&include_adult=false"
-    return try {
-        val shows = JSONObject(tmdbGet(
-            "/discover/tv?$common&first_air_date.gte=${today.minusDays(TOP_SHELF_SHOW_DAYS)}&without_genres=$TOP_SHELF_SKIP_TV_GENRES",
-            key,
-            language,
-        )).getJSONArray("results").objects().filter { !it.isNull("backdrop_path") }.onEach { it.put("media_type", "tv") }
-        val movies = JSONObject(tmdbGet(
-            "/discover/movie?$common&primary_release_date.gte=${today.minusDays(TOP_SHELF_MOVIE_DAYS)}",
-            key,
-            language,
-        )).getJSONArray("results").objects().filter { !it.isNull("backdrop_path") }.onEach { it.put("media_type", "movie") }
-        // Alternate show, movie, show...: movie popularity runs far higher, so a merged sort would be all movies
-        (0 until maxOf(shows.size, movies.size)).flatMap { listOfNotNull(shows.getOrNull(it), movies.getOrNull(it)) }
-            .take(TOP_SHELF_TITLES)
-            .mapNotNull { item ->
-                try {
-                    toTitle(context, key, language, item, open to context.getString(R.string.open_in_app, appLabel))
-                } catch (e: IOException) {
-                    Log.w(TAG, "Skipping ${item.optInt("id")}", e)
-                    null
-                } catch (e: JSONException) {
-                    Log.w(TAG, "Skipping ${item.optInt("id")}", e)
-                    null
-                }
-            }
+    val opens = open to context.getString(R.string.open_in_app, appLabel)
+    val shows = discoverTitles(
+        context,
+        key,
+        language,
+        "tv",
+        "$common&first_air_date.gte=${today.minusDays(TOP_SHELF_SHOW_DAYS)}&without_genres=$TOP_SHELF_SKIP_TV_GENRES",
+        opens,
+    )
+    val movies = discoverTitles(
+        context,
+        key,
+        language,
+        "movie",
+        "$common&primary_release_date.gte=${today.minusDays(TOP_SHELF_MOVIE_DAYS)}",
+        opens,
+    )
+    // Alternate show, movie, show...: movie popularity runs far higher, so a merged sort would be all movies
+    return (0 until maxOf(shows.size, movies.size)).flatMap { listOfNotNull(shows.getOrNull(it), movies.getOrNull(it)) }
+        .take(TOP_SHELF_TITLES)
+}
+
+fun fetchFreeRecommendations(
+    context: Context,
+    key: String = loadTmdbKey(context),
+    language: String = "es-ES",
+): List<TrendingTitle> {
+    if (key.isBlank()) return emptyList()
+    val common = "watch_region=$REGION&with_watch_monetization_types=${Uri.encode("free|ads")}" +
+        "&sort_by=popularity.desc&include_adult=false"
+    val shows = discoverTitles(
+        context,
+        key,
+        language,
+        "tv",
+        "$common&without_genres=$TOP_SHELF_SKIP_TV_GENRES",
+        youtubeSearchIfUnavailable = true,
+    )
+    val movies = discoverTitles(
+        context,
+        key,
+        language,
+        "movie",
+        common,
+        youtubeSearchIfUnavailable = true,
+    )
+    // Alternate shows and movies so the feed isn't dominated by the more popular media type.
+    return (0 until maxOf(shows.size, movies.size)).flatMap { listOfNotNull(shows.getOrNull(it), movies.getOrNull(it)) }
+        .take(TOP_SHELF_TITLES)
+}
+
+private fun discoverTitles(
+    context: Context,
+    key: String,
+    language: String,
+    mediaType: String,
+    query: String,
+    opens: Pair<Intent?, String?>? = null,
+    youtubeSearchIfUnavailable: Boolean = false,
+): List<TrendingTitle> {
+    val items = try {
+        JSONObject(tmdbGet("/discover/$mediaType?$query", key, language))
+            .getJSONArray("results")
+            .objects()
     } catch (e: IOException) {
-        Log.w(TAG, "Top shelf fetch failed for $packageName", e)
-        emptyList()
+        Log.w(TAG, "Discovery fetch failed for $mediaType", e)
+        return emptyList()
     } catch (e: JSONException) {
-        Log.w(TAG, "Unexpected TMDB response for $packageName", e)
-        emptyList()
+        Log.w(TAG, "Unexpected discovery response for $mediaType", e)
+        return emptyList()
     }
+    return items.filter { !it.isNull("backdrop_path") }
+        .take(TOP_SHELF_TITLES / 2)
+        .onEach { it.put("media_type", mediaType) }
+        .mapNotNull { item ->
+            try {
+                toTitle(context, key, language, item, opens, youtubeSearchIfUnavailable)
+            } catch (e: IOException) {
+                Log.w(TAG, "Skipping ${item.optInt("id")}", e)
+                null
+            } catch (e: JSONException) {
+                Log.w(TAG, "Skipping ${item.optInt("id")}", e)
+                null
+            }
+        }
 }
 
 // Accepts both the v3 API key and the v4 read access token (a JWT, starts with "eyJ")

@@ -48,6 +48,7 @@
     <string name="add_favourite">Add to favourites</string>
     <string name="app_info">App info</string>
     <string name="watch_on">Watch on %1$s</string>
+    <string name="search_on_app">Search on %1$s</string>
     <string name="open_in_app">Open %1$s</string>
     <string name="open_in_stremio">Open in Stremio</string>
     <string name="movie">Movie</string>
@@ -60,6 +61,7 @@
     <string name="clear">Clear</string>
     <string name="recommendations_unavailable">Recommendations are unavailable right now. Check the TV network and try again later.</string>
     <string name="loading_recommendations">Loading recommendations…</string>
+    <string name="free_streaming_picks">Free to watch in your region</string>
     <string name="recent_permission_help">Allow Usage access for Home to show recently used apps.</string>
     <string name="weather_clear">Clear</string>
     <string name="weather_partly_cloudy">Partly cloudy</string>

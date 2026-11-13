@@ -49,7 +49,7 @@ jobs:
         working-directory: launcher
         env:
           TMDB_KEY: ${{ secrets.TMDB_KEY }}
-          TMDB_REGION: ${{ vars.TMDB_REGION }}
+          TMDB_REGION: ${{ vars.TMDB_REGION || 'CR' }}
         shell: bash
         run: |
           {

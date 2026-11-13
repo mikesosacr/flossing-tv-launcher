@@ -48,6 +48,7 @@
     <string name="add_favourite">Añadir a favoritos</string>
     <string name="app_info">Información de la app</string>
     <string name="watch_on">Ver en %1$s</string>
+    <string name="search_on_app">Buscar en %1$s</string>
     <string name="open_in_app">Abrir %1$s</string>
     <string name="open_in_stremio">Abrir en Stremio</string>
     <string name="movie">Película</string>
@@ -60,6 +61,7 @@
     <string name="clear">Borrar</string>
     <string name="recommendations_unavailable">Las recomendaciones no están disponibles. Revisa la conexión del televisor e inténtalo más tarde.</string>
     <string name="loading_recommendations">Cargando recomendaciones…</string>
+    <string name="free_streaming_picks">Gratis en tu región</string>
     <string name="recent_permission_help">Permite el acceso al uso para que Home muestre las apps usadas recientemente.</string>
     <string name="weather_clear">Despejado</string>
     <string name="weather_partly_cloudy">Parcialmente nublado</string>
