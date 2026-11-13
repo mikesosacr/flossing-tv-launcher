@@ -18,6 +18,7 @@ import androidx.compose.runtime.setValue
 
 // The first Home after boot goes straight to the Apple TV input
 private const val BOOT_WINDOW_MS = 180_000L
+private const val XIAOMI_PICTURE_SETTINGS = "com.mitv.settings.PICTURE_SETTINGS"
 
 class MainActivity : ComponentActivity() {
     private var reloadKey by mutableIntStateOf(0)
@@ -56,6 +57,10 @@ class MainActivity : ComponentActivity() {
                 onAppInfo = { app ->
                     launch(this, Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.packageName}")))
                 },
+                onWifiSettings = { launch(this, Intent(Settings.ACTION_WIFI_SETTINGS)) },
+                onPictureSettings = { launch(this, pictureSettings()) },
+                onSoundSettings = { launch(this, Intent(Settings.ACTION_SOUND_SETTINGS)) },
+                onAndroidSettings = { launch(this, Intent(Settings.ACTION_SETTINGS)) },
                 // Stremio title links only work on a cold start; plain app launches don't need that
                 onOpenTrending = { if (it.data != null) launchFresh(this, it) else launch(this, it) },
             )
@@ -88,5 +93,10 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         unregisterReceiver(packageReceiver)
         super.onDestroy()
+    }
+
+    private fun pictureSettings(): Intent {
+        val xiaomi = Intent(XIAOMI_PICTURE_SETTINGS)
+        return if (packageManager.resolveActivity(xiaomi, 0) != null) xiaomi else Intent(Settings.ACTION_DISPLAY_SETTINGS)
     }
 }

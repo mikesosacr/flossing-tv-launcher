@@ -13,15 +13,17 @@ Written up end to end here: [How I Debloated My Android TV and Built My Own Laun
 
 ## Features
 
-- **Apple TV-style look.** Like tvOS: the focused app's art fills the screen, one row of five tiles sits under it, and the only other thing on screen is a small clock. Focus is a lift and a glow in the app's colour (no thick borders). [Inter](https://rsms.me/inter/) font in text and display sizes, or any variable font you point it at.
+- **Apple TV-style look.** Like tvOS: the focused app's art fills the screen, with the clock, greeting, date, weather and quick settings above it. Focus is a lift and a glow in the app's colour (no thick borders). [Inter](https://rsms.me/inter/) font in text and display sizes, or any variable font you point it at.
 - **Your HDMI device first.** If something on HDMI names itself over CEC (an Apple TV, a console), it's the first tile of the top row, named big with an on/asleep status, and it has focus, so Home → OK takes you straight back to it.
 - **Top shelf for streaming apps** (needs a free TMDB key). Rest on Netflix, Prime Video, JioHotstar, Sony LIV or the Apple TV app and the screen fills with what's popular on it in your country right now: art, logo, genre, rating. Fetched in the background every 6 hours, only while the home screen is showing.
 - **Living wallpaper.** A different image for dawn, day, dusk and night that crossfades as the day goes on. It stays still: a slow drift made detailed photos shimmer. `launcher/tools/wallpapers.py` makes the set: AI art with an OpenAI key, or gradient placeholders.
 - **The TV follows the Apple TV.** Turn the Apple TV off and the TV goes to sleep; turn the TV on and it opens the Apple TV's input (waking it). Needs a few adb grants, which `deploy.sh` does.
 - **Trending this week** (optional, shown when there's no HDMI device). Popular movies and shows from [TMDB](https://www.themoviedb.org/) with a full-screen backdrop, logo and rating. The button opens **the app that streams the title in your country** (Netflix, Prime Video, Disney+, Hotstar, Apple TV+, Hulu, Paramount+) if you have it installed, otherwise the title's page in Stremio if you have that.
-- **Your apps, your order.** A favourites row and an all-apps row (with a Settings tile at the end); Down jumps straight to the next row. Long-press any tile to **move it, add it to or remove it from favourites**, or open App info.
+- **Weather and recent apps.** Current local weather appears in the header when location is available; a Recent row shows your last-used apps. Both can be turned on or off from Launcher settings.
+- **Your apps, your order.** A favourites row, Recent row and an all-apps row (with a Launcher settings tile at the end); Down jumps straight to the next row. Long-press an app tile to **move it, add it to or remove it from favourites**, or open App info.
+- **Launcher settings.** The Settings tile and header button open launcher options for weather, Recent apps, streaming recommendations and OLED care, plus shortcuts to Wi-Fi, picture, sound and Android settings.
 - **HDMI inputs as tiles** on TVs, named after the connected device where the TV reports it (e.g. "Apple TV · HDMI 1"). Hidden on streaming boxes.
-- **OLED care**: pure black background, the layout drifts a few pixels every two minutes, and the screen dims after a minute of no input and 25% at night. One switch turns it off on LCD TVs.
+- **OLED care**: pure black background, the layout drifts a few pixels every two minutes, and the screen dims after a minute of no input and 25% at night. Toggle it in Launcher settings for LCD TVs.
 
 ## What's inside
 
@@ -140,7 +142,7 @@ Always use the **release** build: it's optimised with R8, and debug Compose buil
 adb -s <tv-ip>:5555 shell am start -n me.prince.launcher/.MainActivity   # try it first
 ```
 
-`deploy.sh` installs the release build and grants, over adb: location (only used by the old header's Wi-Fi name and weather), usage stats (which app is in front, for the power service), log access (CEC messages from the Apple TV), secure settings (so sleep turns the TV off instead of starting the screensaver) and "display over other apps" (opening the HDMI input from the background). It also enables the power service, pre-compiles the app and makes it the home activity. If you built on a different computer than last time, the install fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`; `./deploy.sh <tv-ip> --replace-signature` uninstalls first, which resets your favourites order.
+`deploy.sh` installs the release build and grants, over adb: location (for the Wi-Fi name and weather), usage stats (for Recent apps and the power service), log access (CEC messages from the Apple TV), secure settings (so sleep turns the TV off instead of starting the screensaver) and "display over other apps" (opening the HDMI input from the background). It also enables the power service, pre-compiles the app and makes it the home activity. If you built on a different computer than last time, the install fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`; `./deploy.sh <tv-ip> --replace-signature` uninstalls first, which resets your favourites order.
 
 ### 6. Make it the home screen
 
@@ -160,7 +162,7 @@ adb -s $S shell pm disable-user --user 0 com.google.android.tvlauncher
 ## Customise
 
 - **Favourites:** long-press a tile → Move / Add to favourites / Remove. The order is saved on the TV. The defaults for a fresh install are at the top of `Apps.kt`.
-- **OLED care:** set `OLED_CARE = false` at the top of `HomeScreen.kt` on an LCD TV.
+- **Launcher settings:** open Settings from the home header or the end of All apps to toggle weather, Recent apps, recommendations and OLED care. The same screen keeps quick links to Wi-Fi, picture, sound and Android settings.
 - **Streaming apps for the trending button:** add TMDB provider ids and Android TV package names to `PROVIDER_APPS` in `Trending.kt`.
 - **Font:** set `ui.font=<path>` (and `ui.font.opsz=<text>,<display>`) in `local.properties` to use any variable font with `wght` and `opsz` axes; the default is `app/fonts/inter.ttf`.
 
@@ -181,7 +183,7 @@ If the TV ever shows a black screen on Home, `adb -s <tv-ip>:5555 shell pm enabl
 - **Disabling the stock launcher can break "Ok Google"** on TVs with a far-field (hands-free) mic. Android 11+ only lets a background app use the microphone if an app in the foreground lends it that permission, and the stock launcher was doing that for Google Assistant. `Hotword.kt` has the fix (a microphone-type foreground service that binds the Assistant with `BIND_INCLUDE_CAPABILITIES`); set `HANDS_FREE_OK_GOOGLE = true` if your TV needs it. Some TVs don't: on a Xiaomi MiTV the Assistant keeps listening anyway. Always-on listening costs about a quarter of a CPU core on a MediaTek TV; to save that, turn "Ok Google" off in the Assistant's settings or flip the TV's mic switch. The voice button on the remote works either way.
 - **Removing a package can crash-loop a system service.** On Xiaomi TVs, removing `com.xiaomi.android.tvsetup.partnercustomizer` makes `com.mediatek.tv.service` crash several times a second, pinning the CPU and freezing HDMI inputs. After any debloat, check that `adb shell dumpsys dropbox | grep -c system_app_crash` stays flat for a minute.
 - **Ad blocking without a VPN app.** Android's Private DNS (`settings put global private_dns_mode hostname` and `private_dns_specifier dns.adguard-dns.com`) blocks most ads with no app running in the background.
-- **The Wi-Fi button says "Wi-Fi" instead of your network name**, and **there's no weather.** Both need location permission: run the `pm grant ... ACCESS_COARSE_LOCATION` line above. Weather also needs the TV to know its location; some streaming boxes don't, and then it's simply hidden.
+- **The Wi-Fi button says "Wi-Fi" instead of your network name**, or **weather is hidden.** Both need location permission: run the `pm grant ... ACCESS_COARSE_LOCATION` line above. Weather also needs the TV to know its location; some streaming boxes don't, and then it stays hidden.
 - **VPN ad blockers.** Apps like AdGuard run as a VPN, which makes the VPN the "active network". The launcher checks every network, so the Wi-Fi label still works.
 - **Firmware updates** can bring removed apps back. Re-run `./debloat.sh <tv-ip>`.
 

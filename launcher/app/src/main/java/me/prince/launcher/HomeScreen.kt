@@ -56,6 +56,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -133,6 +134,8 @@ private val HeroAreaHeight = 318.dp
 const val BACKDROP_HEIGHT_FRACTION = 1f
 private const val HERO_ROTATE_MS = 10_000L
 private const val TRENDING_REFRESH_MS = 6 * 60 * 60_000L
+private const val WEATHER_REFRESH_MS = 30 * 60_000L
+private const val RECENT_COUNT = 8
 // The first TLS handshake after start often fails (AdGuard's HTTPS filtering?); the retry works
 private const val TRENDING_RETRY_MS = 15_000L
 // Feed key for this week's trending (the other feeds are keyed by package name)
@@ -146,8 +149,6 @@ private val EdgePadding = 56.dp
 // How far the page scrolls before the backdrop has fully dimmed
 private val BackdropFadeDistance = 300.dp
 
-// OLED burn-in care: static UI drifts a few px, dims when idle and at night. Set to false on LCD TVs.
-private const val OLED_CARE = true
 private const val IDLE_DIM_MS = 60_000L
 private const val IDLE_DIM = 0.65f
 private const val NIGHT_DIM = 0.25f
@@ -170,22 +171,37 @@ fun HomeScreen(
     visible: Boolean,
     onLaunch: (TvApp) -> Unit,
     onAppInfo: (TvApp) -> Unit,
+    onWifiSettings: () -> Unit,
+    onPictureSettings: () -> Unit,
+    onSoundSettings: () -> Unit,
+    onAndroidSettings: () -> Unit,
     onOpenTrending: (Intent) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var apps by remember { mutableStateOf(emptyList<TvApp>()) }
+    var launcherOptions by remember { mutableStateOf(loadLauncherOptions(context)) }
     var favouriteIds by remember { mutableStateOf(loadFavourites(context)) }
+    var recentIds by remember { mutableStateOf(emptyList<String>()) }
     var inputs by remember { mutableStateOf(emptyList<TvApp>()) }
     var focusedApp by remember { mutableStateOf<TvApp?>(null) }
     var menu by remember { mutableStateOf<MenuTarget?>(null) }
     var menuBackdrop by remember { mutableStateOf<ImageBitmap?>(null) }
+    var settingsOpen by remember { mutableStateOf(false) }
+    var settingsBackdrop by remember { mutableStateOf<ImageBitmap?>(null) }
+    var weather by remember { mutableStateOf<Weather?>(null) }
     val window = (context as Activity).window
     // Capture and blur the screen first so the menu opens over frosted glass
     fun openMenu(target: MenuTarget) {
         captureBlurredWindow(window) {
             menuBackdrop = it
             menu = target
+        }
+    }
+    fun openSettings() {
+        captureBlurredWindow(window) {
+            settingsBackdrop = it
+            settingsOpen = true
         }
     }
     var movingId by remember { mutableStateOf<String?>(null) }
@@ -199,6 +215,7 @@ fun HomeScreen(
     // First tile of each lower row: Down jumps there directly. Those rows start below the screen edge, and Compose
     // won't move focus to a tile it can't see; it scrolls a bit instead, so Down looked like it did nothing.
     val inputsHead = remember { FocusRequester() }
+    val recentHead = remember { FocusRequester() }
     val allAppsHead = remember { FocusRequester() }
     val settingsTile = remember {
         TvApp(
@@ -219,6 +236,20 @@ fun HomeScreen(
         inputs = withContext(Dispatchers.IO) { loadInputs(context) }
         inputsLoaded = true
     }
+    LaunchedEffect(resumes, launcherOptions.showRecentApps) {
+        recentIds = if (launcherOptions.showRecentApps) {
+            withContext(Dispatchers.IO) { recentPackages(context) }
+        } else {
+            emptyList()
+        }
+    }
+    LaunchedEffect(visible, launcherOptions.showWeather) {
+        if (!visible || !launcherOptions.showWeather) return@LaunchedEffect
+        while (true) {
+            withContext(Dispatchers.IO) { fetchWeather(context) }?.let { weather = it }
+            delay(WEATHER_REFRESH_MS)
+        }
+    }
 
     // The HDMI device that names itself over CEC (the Apple TV) leads the top row; any other inputs get their own row
     val hdmiDevice = inputs.firstOrNull { it.detail != null }
@@ -227,6 +258,7 @@ fun HomeScreen(
 
     val byPackage = remember(apps) { apps.associateBy { it.packageName } }
     val favourites = favouriteIds.mapNotNull { byPackage[it] }
+    val recents = recentIds.filter { it !in favouriteIds }.mapNotNull { byPackage[it] }.take(RECENT_COUNT)
     // Moved apps first, in their saved order; the rest stay alphabetical (sortedBy is stable)
     val others = apps.filter { it.packageName !in favouriteIds }
         .sortedBy { app -> orderIds.indexOf(app.packageName).let { if (it < 0) Int.MAX_VALUE else it } }
@@ -234,6 +266,11 @@ fun HomeScreen(
     fun updateFavourites(ids: List<String>) {
         favouriteIds = ids
         saveFavourites(context, ids)
+    }
+
+    fun updateOptions(options: LauncherOptions) {
+        launcherOptions = options
+        saveLauncherOptions(context, options)
     }
 
     // Move mode, in the top row or All apps: left/right shifts the tile, OK or Back finishes
@@ -292,8 +329,12 @@ fun HomeScreen(
     val feeds = remember { mutableStateMapOf<String, List<TrendingTitle>>() }
     val nextFetch = remember { mutableMapOf<String, Long>() }
     val failures = remember { mutableMapOf<String, Int>() }
-    val feedKeys = apps.map { it.packageName }.filter { it in TOP_SHELF_PROVIDERS } +
-        listOfNotNull(TRENDING_FEED.takeIf { inputsLoaded && hdmiDevice == null })
+    val feedKeys = if (launcherOptions.showRecommendations) {
+        apps.map { it.packageName }.filter { it in TOP_SHELF_PROVIDERS } +
+            listOfNotNull(TRENDING_FEED.takeIf { inputsLoaded && hdmiDevice == null })
+    } else {
+        emptyList()
+    }
     LaunchedEffect(visible, feedKeys) {
         // No key: nothing to fetch, ever
         if (!visible || BuildConfig.TMDB_KEY.isBlank() || feedKeys.isEmpty()) return@LaunchedEffect
@@ -328,8 +369,12 @@ fun HomeScreen(
         delay(SHELF_SETTLE_MS)
         shelfApp = focusedApp
     }
-    val shelfTitles = shelfApp?.let { feeds[it.packageName] }.orEmpty()
-    val heroTitles = shelfTitles.ifEmpty { if (hdmiDevice == null) feeds[TRENDING_FEED].orEmpty() else emptyList() }
+    val shelfTitles = if (launcherOptions.showRecommendations) shelfApp?.let { feeds[it.packageName] }.orEmpty() else emptyList()
+    val heroTitles = if (launcherOptions.showRecommendations) {
+        shelfTitles.ifEmpty { if (hdmiDevice == null) feeds[TRENDING_FEED].orEmpty() else emptyList() }
+    } else {
+        emptyList()
+    }
     val heroLabel = if (shelfTitles.isNotEmpty()) "Top on ${shelfApp?.label}" else "Trending this week"
     var heroIndex by remember(heroTitles) { mutableIntStateOf(0) }
     var heroFocused by remember { mutableStateOf(false) }
@@ -358,6 +403,7 @@ fun HomeScreen(
 
     val now = rememberNow()
     val part = dayPart(now.hour)
+    val networkLabel = rememberNetworkLabel()
     // Decoded only while the home screen is on screen; ~8 MB freed the moment an app or input takes over.
     // Not keyed on the titles: moving focus between apps must not decode it again.
     val wallpaper by produceState<Wallpaper?>(null, visible, part) {
@@ -374,8 +420,8 @@ fun HomeScreen(
         idle = true
     }
     val night = now.hour >= 22 || now.hour < 6
-    val idleDim = if (OLED_CARE && idle) IDLE_DIM else 0f
-    val nightDim = if (OLED_CARE && night) NIGHT_DIM else 0f
+    val idleDim = if (launcherOptions.oledCare && idle) IDLE_DIM else 0f
+    val nightDim = if (launcherOptions.oledCare && night) NIGHT_DIM else 0f
     val dim by animateFloatAsState(
         targetValue = 1 - (1 - idleDim) * (1 - nightDim),
         animationSpec = tween(if (idle) 3000 else 250),
@@ -389,7 +435,7 @@ fun HomeScreen(
             value++
         }
     }
-    val (shiftX, shiftY) = if (OLED_CARE) ShiftOrbit[shiftStep % ShiftOrbit.size] else (0 to 0)
+    val (shiftX, shiftY) = if (launcherOptions.oledCare) ShiftOrbit[shiftStep % ShiftOrbit.size] else (0 to 0)
     val shift by animateIntOffsetAsState(
         with(density) { IntOffset(shiftX.dp.roundToPx(), shiftY.dp.roundToPx()) },
         tween(2000),
@@ -467,9 +513,18 @@ fun HomeScreen(
                         .verticalScroll(scroll)
                 ) {
                     val movingHint = movingId?.let { id -> byPackage[id]?.label }?.let { "Moving $it  ·  ◀ ▶ to move, OK to finish" }
-                    // tvOS-like: nothing but the art, a small clock and the title, bottom left, above one row of apps
+                    // Keep the original clock, date, greeting, network and quick settings above the hero.
                     Box(Modifier.fillMaxWidth().height(HeroAreaHeight)) {
-                        Clock(now, Modifier.align(Alignment.TopEnd).padding(top = 30.dp, end = EdgePadding))
+                        HomeHeader(
+                            now = now,
+                            weather = weather.takeIf { launcherOptions.showWeather },
+                            networkLabel = networkLabel,
+                            onWifi = onWifiSettings,
+                            onPicture = onPictureSettings,
+                            onSound = onSoundSettings,
+                            onSettings = ::openSettings,
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp),
+                        )
                         Box(Modifier.align(Alignment.BottomStart)) {
                             if (hero != null) {
                                 Hero(
@@ -496,11 +551,15 @@ fun HomeScreen(
                         }
                     }
                     val onFocused = { app: TvApp -> focusedApp = app }
+                    val launchTile: (TvApp) -> Unit = {
+                        if (it.packageName == SETTINGS_TILE) openSettings() else onLaunch(it)
+                    }
                     // Top row: the Apple TV first (OK opens it, which also wakes it over CEC), then favourites
                     val topRow = listOfNotNull(hdmiDevice) + favourites
                     // Where Down goes from each row (its first tile); All apps' first tile is firstTile when the top row is empty
                     val allAppsFirst = if (topRow.isEmpty()) firstTile else allAppsHead
-                    val belowTop = if (otherInputs.isNotEmpty()) inputsHead else allAppsFirst
+                    val belowInputs = if (recents.isNotEmpty()) recentHead else allAppsFirst
+                    val belowTop = if (otherInputs.isNotEmpty()) inputsHead else belowInputs
                     Shelf(
                         topRow,
                         favouritesRow,
@@ -515,7 +574,19 @@ fun HomeScreen(
                     )
                     if (otherInputs.isNotEmpty()) {
                         ShelfLabel("Inputs")
-                        Shelf(otherInputs, rememberLazyListState(), inputsHead, onLaunch, {}, onFocused, down = allAppsFirst)
+                        Shelf(otherInputs, rememberLazyListState(), inputsHead, launchTile, {}, onFocused, down = belowInputs)
+                    }
+                    if (recents.isNotEmpty()) {
+                        ShelfLabel("Recent")
+                        Shelf(
+                            recents,
+                            rememberLazyListState(),
+                            recentHead,
+                            launchTile,
+                            { openMenu(MenuTarget(it, canMove = false)) },
+                            onFocused,
+                            down = allAppsFirst,
+                        )
                     }
                     ShelfLabel("All apps")
                     Shelf(
@@ -524,7 +595,7 @@ fun HomeScreen(
                         if (others.isEmpty()) emptyList() else others + settingsTile,
                         allAppsRow,
                         allAppsFirst,
-                        onLaunch,
+                        launchTile,
                         { if (it.packageName != SETTINGS_TILE) openMenu(MenuTarget(it, canMove = true)) },
                         onFocused,
                     )
@@ -556,6 +627,18 @@ fun HomeScreen(
                     menu = null
                     onAppInfo(app)
                 },
+            )
+        }
+        if (settingsOpen) {
+            LauncherSettingsDialog(
+                options = launcherOptions,
+                backdrop = settingsBackdrop,
+                onDismiss = { settingsOpen = false },
+                onOptionsChange = ::updateOptions,
+                onWifiSettings = onWifiSettings,
+                onPictureSettings = onPictureSettings,
+                onSoundSettings = onSoundSettings,
+                onAndroidSettings = onAndroidSettings,
             )
         }
     }
@@ -797,6 +880,96 @@ private fun AppMenu(
     }
 }
 
+@Composable
+private fun LauncherSettingsDialog(
+    options: LauncherOptions,
+    backdrop: ImageBitmap?,
+    onDismiss: () -> Unit,
+    onOptionsChange: (LauncherOptions) -> Unit,
+    onWifiSettings: () -> Unit,
+    onPictureSettings: () -> Unit,
+    onSoundSettings: () -> Unit,
+    onAndroidSettings: () -> Unit,
+) {
+    val firstItem = remember { FocusRequester() }
+    LaunchedEffect(Unit) { firstItem.requestFocusWhenAttached() }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val bounds = with(LocalDensity.current) { Rect(0f, 0f, maxWidth.toPx(), maxHeight.toPx()) }
+            if (backdrop != null) {
+                Image(backdrop, contentDescription = null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
+            }
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
+            CompositionLocalProvider(LocalGlassSource provides backdrop?.let { GlassSource(it, { bounds }) }) {
+                Column(
+                    Modifier
+                        .width(480.dp)
+                        .heightIn(max = 620.dp)
+                        .glass(MenuShape)
+                        .verticalScroll(rememberScrollState())
+                        .padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(9.dp),
+                ) {
+                    Text(
+                        "Launcher settings",
+                        color = TextPrimary,
+                        fontSize = 25.sp,
+                        fontFamily = UiDisplay,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+                    )
+                    Text(
+                        "Home screen",
+                        color = TextSecondary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                    )
+                    Pill(
+                        null,
+                        "Weather: ${if (options.showWeather) "On" else "Off"}",
+                        { onOptionsChange(options.copy(showWeather = !options.showWeather)) },
+                        Modifier.fillMaxWidth().focusRequester(firstItem),
+                        fillWidth = true,
+                    )
+                    Pill(
+                        null,
+                        "Recent apps: ${if (options.showRecentApps) "On" else "Off"}",
+                        { onOptionsChange(options.copy(showRecentApps = !options.showRecentApps)) },
+                        Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                    Pill(
+                        null,
+                        "Streaming recommendations: ${if (options.showRecommendations) "On" else "Off"}",
+                        { onOptionsChange(options.copy(showRecommendations = !options.showRecommendations)) },
+                        Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                    Pill(
+                        null,
+                        "OLED care: ${if (options.oledCare) "On" else "Off"}",
+                        { onOptionsChange(options.copy(oledCare = !options.oledCare)) },
+                        Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                    Text(
+                        "TV settings",
+                        color = TextSecondary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+                    )
+                    Pill(null, "Wi-Fi settings", onWifiSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, "Picture settings", onPictureSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, "Sound settings", onSoundSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, "Android settings", onAndroidSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                }
+            }
+        }
+    }
+}
+
 // Compose's TV default pins the focused item 30% from the edge, which scrolls the header away.
 // Scroll only when the item would leave the screen, keeping a margin so the focus scale isn't clipped.
 @OptIn(ExperimentalFoundationApi::class)
@@ -824,19 +997,106 @@ private fun rememberNow(): LocalDateTime {
     return now
 }
 
-// Just the time, small and light, top right (the header used to carry a greeting, date, weather and four buttons)
 @Composable
-private fun Clock(now: LocalDateTime, modifier: Modifier) {
+private fun HomeHeader(
+    now: LocalDateTime,
+    weather: Weather?,
+    networkLabel: String,
+    onWifi: () -> Unit,
+    onPicture: () -> Unit,
+    onSound: () -> Unit,
+    onSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
-    val pattern = if (DateFormat.is24HourFormat(context)) "H:mm" else "h:mm"
-    Text(
-        now.format(java.time.format.DateTimeFormatter.ofPattern(pattern)),
-        color = TextPrimary.copy(alpha = 0.85f),
-        fontSize = 20.sp,
-        fontFamily = UiDisplay,
-        fontWeight = FontWeight.Medium,
-        modifier = modifier,
-    )
+    val is24h = DateFormat.is24HourFormat(context)
+    Row(
+        modifier.fillMaxWidth().padding(horizontal = EdgePadding),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                now.format(DateTimeFormatter.ofPattern(if (is24h) "HH:mm" else "h:mm")),
+                color = TextPrimary,
+                fontSize = 50.sp,
+                fontFamily = UiDisplay,
+                fontWeight = FontWeight.Light,
+            )
+            if (!is24h) {
+                Text(
+                    " " + now.format(DateTimeFormatter.ofPattern("a")).uppercase(),
+                    color = TextSecondary,
+                    fontSize = 16.sp,
+                    modifier = Modifier.padding(bottom = 5.dp),
+                )
+            }
+        }
+        Spacer(Modifier.width(18.dp))
+        Column {
+            Text(greeting(now.hour), color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            val weatherText = weather?.let { "  ·  ${it.temperature}° ${it.summary}" }.orEmpty()
+            Text(
+                now.format(DateTimeFormatter.ofPattern("EEEE d MMMM")) + weatherText,
+                color = TextSecondary,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Pill(R.drawable.ic_picture, null, onPicture)
+            Pill(R.drawable.ic_sound, null, onSound)
+            Pill(R.drawable.ic_wifi, networkLabel, onWifi)
+            Pill(R.drawable.ic_settings, "Settings", onSettings)
+        }
+    }
+}
+
+private fun greeting(hour: Int): String = when (hour) {
+    in 5..11 -> "Good morning"
+    in 12..16 -> "Good afternoon"
+    else -> "Good evening"
+}
+
+@Composable
+private fun rememberNetworkLabel(): String {
+    val context = LocalContext.current
+    var label by remember { mutableStateOf(networkLabel(context)) }
+    DisposableEffect(Unit) {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                label = networkLabel(context)
+            }
+
+            override fun onLost(network: Network) {
+                label = networkLabel(context)
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                label = networkLabel(context)
+            }
+        }
+        connectivity.registerDefaultNetworkCallback(callback)
+        onDispose { connectivity.unregisterNetworkCallback(callback) }
+    }
+    return label
+}
+
+@Suppress("DEPRECATION")
+private fun networkLabel(context: Context): String {
+    val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    val networks = connectivity.allNetworks.mapNotNull { connectivity.getNetworkCapabilities(it) }
+    if (networks.none { it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) }) return "Offline"
+    return when {
+        networks.any { it.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) } -> "Ethernet"
+        networks.any { it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) } -> {
+            val ssid = context.applicationContext.getSystemService(WifiManager::class.java).connectionInfo.ssid
+            ssid?.trim('"')?.takeUnless { it.isBlank() || it == "<unknown ssid>" } ?: "Wi-Fi"
+        }
+        else -> "Online"
+    }
 }
 
 @Composable
