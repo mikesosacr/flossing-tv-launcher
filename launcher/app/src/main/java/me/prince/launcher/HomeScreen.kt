@@ -9,13 +9,13 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.runtime.collectAsState
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.animation.core.animateDpAsState
-import android.app.Activity
 import android.content.Intent
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.content.ContextCompat
 import android.os.SystemClock
 import android.util.Log
+import android.view.Window
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -68,6 +68,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -93,11 +94,14 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -169,6 +173,10 @@ fun HomeScreen(
     homePresses: Int,
     resumes: Int,
     visible: Boolean,
+    language: String,
+    onLanguageChange: (String) -> Unit,
+    window: Window,
+    onUsageSettings: () -> Unit,
     onLaunch: (TvApp) -> Unit,
     onAppInfo: (TvApp) -> Unit,
     onWifiSettings: () -> Unit,
@@ -183,6 +191,7 @@ fun HomeScreen(
     var launcherOptions by remember { mutableStateOf(loadLauncherOptions(context)) }
     var favouriteIds by remember { mutableStateOf(loadFavourites(context)) }
     var recentIds by remember { mutableStateOf(emptyList<String>()) }
+    var recentAccessMissing by remember { mutableStateOf(false) }
     var inputs by remember { mutableStateOf(emptyList<TvApp>()) }
     var focusedApp by remember { mutableStateOf<TvApp?>(null) }
     var menu by remember { mutableStateOf<MenuTarget?>(null) }
@@ -190,7 +199,8 @@ fun HomeScreen(
     var settingsOpen by remember { mutableStateOf(false) }
     var settingsBackdrop by remember { mutableStateOf<ImageBitmap?>(null) }
     var weather by remember { mutableStateOf<Weather?>(null) }
-    val window = (context as Activity).window
+    var tmdbKey by remember { mutableStateOf(loadTmdbKey(context)) }
+    var recommendationFailed by remember { mutableStateOf(false) }
     // Capture and blur the screen first so the menu opens over frosted glass
     fun openMenu(target: MenuTarget) {
         captureBlurredWindow(window) {
@@ -217,33 +227,32 @@ fun HomeScreen(
     val inputsHead = remember { FocusRequester() }
     val recentHead = remember { FocusRequester() }
     val allAppsHead = remember { FocusRequester() }
-    val settingsTile = remember {
+    val settingsTile = remember(language) {
         TvApp(
             packageName = SETTINGS_TILE,
-            label = "Settings",
+            label = context.getString(R.string.settings),
             image = ContextCompat.getDrawable(context, R.drawable.ic_settings)!!.toBitmap(96, 96).asImageBitmap(),
             hasBanner = false,
             glow = Color(0xFF4A5568),
             launchIntent = Intent(android.provider.Settings.ACTION_SETTINGS),
         )
     }
-    var inputsLoaded by remember { mutableStateOf(false) }
-
     LaunchedEffect(reloadKey) {
         apps = withContext(Dispatchers.IO) { loadApps(context) }
     }
     LaunchedEffect(resumes) {
         inputs = withContext(Dispatchers.IO) { loadInputs(context) }
-        inputsLoaded = true
     }
     LaunchedEffect(resumes, launcherOptions.showRecentApps) {
         recentIds = if (launcherOptions.showRecentApps) {
-            withContext(Dispatchers.IO) { recentPackages(context) }
+            recentAccessMissing = !hasUsageStatsAccess(context)
+            if (recentAccessMissing) emptyList() else withContext(Dispatchers.IO) { recentPackages(context) }
         } else {
+            recentAccessMissing = false
             emptyList()
         }
     }
-    LaunchedEffect(visible, launcherOptions.showWeather) {
+    LaunchedEffect(visible, launcherOptions.showWeather, language) {
         if (!visible || !launcherOptions.showWeather) return@LaunchedEffect
         while (true) {
             withContext(Dispatchers.IO) { fetchWeather(context) }?.let { weather = it }
@@ -259,6 +268,7 @@ fun HomeScreen(
     val byPackage = remember(apps) { apps.associateBy { it.packageName } }
     val favourites = favouriteIds.mapNotNull { byPackage[it] }
     val recents = recentIds.filter { it !in favouriteIds }.mapNotNull { byPackage[it] }.take(RECENT_COUNT)
+    val hasRecentRow = recents.isNotEmpty() || recentAccessMissing
     // Moved apps first, in their saved order; the rest stay alphabetical (sortedBy is stable)
     val others = apps.filter { it.packageName !in favouriteIds }
         .sortedBy { app -> orderIds.indexOf(app.packageName).let { if (it < 0) Int.MAX_VALUE else it } }
@@ -271,6 +281,7 @@ fun HomeScreen(
     fun updateOptions(options: LauncherOptions) {
         launcherOptions = options
         saveLauncherOptions(context, options)
+        if (options.language != language) onLanguageChange(options.language)
     }
 
     // Move mode, in the top row or All apps: left/right shifts the tile, OK or Back finishes
@@ -323,34 +334,46 @@ fun HomeScreen(
     val shownApp = focusedApp ?: favourites.firstOrNull() ?: others.firstOrNull()
     val glow by animateColorAsState(shownApp?.glow ?: Background, tween(600), label = "glow")
 
-    // Titles for the top of the screen, like tvOS's top shelf: each installed streaming app's popular titles, plus this
-    // week's trending when there's no HDMI device to feature. Refreshed every 6 h, in the background, only while Home
-    // is on screen (never while the Apple TV is in front); moving focus only picks from what's already here.
+    // Titles for the top of the screen: each supported app's popular titles, with general trending as a fallback.
+    // Refreshed every 6 h, in the background, only while Home is on screen; moving focus only picks fetched titles.
     val feeds = remember { mutableStateMapOf<String, List<TrendingTitle>>() }
     val nextFetch = remember { mutableMapOf<String, Long>() }
     val failures = remember { mutableMapOf<String, Int>() }
     val feedKeys = if (launcherOptions.showRecommendations) {
         apps.map { it.packageName }.filter { it in TOP_SHELF_PROVIDERS } +
-            listOfNotNull(TRENDING_FEED.takeIf { inputsLoaded && hdmiDevice == null })
+            listOf(TRENDING_FEED)
     } else {
         emptyList()
     }
-    LaunchedEffect(visible, feedKeys) {
+    LaunchedEffect(language, tmdbKey) {
+        feeds.clear()
+        nextFetch.clear()
+        failures.clear()
+        recommendationFailed = false
+    }
+    LaunchedEffect(visible, feedKeys, tmdbKey, language) {
         // No key: nothing to fetch, ever
-        if (!visible || BuildConfig.TMDB_KEY.isBlank() || feedKeys.isEmpty()) return@LaunchedEffect
+        if (!visible || tmdbKey.isBlank() || feedKeys.isEmpty()) return@LaunchedEffect
         while (true) {
             for (feed in feedKeys) {
                 if ((nextFetch[feed] ?: 0L) > SystemClock.elapsedRealtime()) continue
                 val started = SystemClock.elapsedRealtime()
                 val titles = withContext(Dispatchers.IO) {
-                    if (feed == TRENDING_FEED) fetchTrending(context) else fetchTopShelf(context, feed, byPackage[feed]?.label.orEmpty())
+                    val contentLanguage = if (language == "es") "es-ES" else "en-US"
+                    if (feed == TRENDING_FEED) {
+                        fetchTrending(context, tmdbKey, contentLanguage)
+                    } else {
+                        fetchTopShelf(context, feed, byPackage[feed]?.label.orEmpty(), tmdbKey, contentLanguage)
+                    }
                 }
                 Log.i("TopShelf", "$feed: ${titles.size} titles in ${SystemClock.elapsedRealtime() - started} ms")
                 if (titles.isNotEmpty()) {
                     feeds[feed] = titles
+                    recommendationFailed = false
                     failures.remove(feed)
                     nextFetch[feed] = SystemClock.elapsedRealtime() + TRENDING_REFRESH_MS
                 } else {
+                    recommendationFailed = true
                     // Keep the old titles. A blip at boot retries in 15 s; a feed that keeps failing backs off to 6 h.
                     val count = (failures[feed] ?: 0) + 1
                     failures[feed] = count
@@ -371,11 +394,21 @@ fun HomeScreen(
     }
     val shelfTitles = if (launcherOptions.showRecommendations) shelfApp?.let { feeds[it.packageName] }.orEmpty() else emptyList()
     val heroTitles = if (launcherOptions.showRecommendations) {
-        shelfTitles.ifEmpty { if (hdmiDevice == null) feeds[TRENDING_FEED].orEmpty() else emptyList() }
+        shelfTitles.ifEmpty { feeds[TRENDING_FEED].orEmpty() }
     } else {
         emptyList()
     }
-    val heroLabel = if (shelfTitles.isNotEmpty()) "Top on ${shelfApp?.label}" else "Trending this week"
+    val recommendationHint = when {
+        !launcherOptions.showRecommendations || heroTitles.isNotEmpty() -> null
+        tmdbKey.isBlank() -> stringResource(R.string.tmdb_key_missing)
+        recommendationFailed -> stringResource(R.string.recommendations_unavailable)
+        else -> stringResource(R.string.loading_recommendations)
+    }
+    val heroLabel = if (shelfTitles.isNotEmpty()) {
+        stringResource(R.string.top_on, shelfApp?.label.orEmpty())
+    } else {
+        stringResource(R.string.trending_this_week)
+    }
     var heroIndex by remember(heroTitles) { mutableIntStateOf(0) }
     var heroFocused by remember { mutableStateOf(false) }
     LaunchedEffect(heroIndex, heroFocused, heroTitles, visible) {
@@ -512,7 +545,8 @@ fun HomeScreen(
                         .offset { shift }
                         .verticalScroll(scroll)
                 ) {
-                    val movingHint = movingId?.let { id -> byPackage[id]?.label }?.let { "Moving $it  ·  ◀ ▶ to move, OK to finish" }
+                    val movingHint = movingId?.let { id -> byPackage[id]?.label }
+                        ?.let { stringResource(R.string.moving_hint, it) }
                     // Keep the original clock, date, greeting, network and quick settings above the hero.
                     Box(Modifier.fillMaxWidth().height(HeroAreaHeight)) {
                         HomeHeader(
@@ -541,12 +575,24 @@ fun HomeScreen(
                                 // The focused tile's name; for the Apple TV also its port and whether it's awake (from CEC)
                                 val featured = shelfApp ?: hdmiDevice ?: shownApp
                                 val isDevice = featured != null && featured == hdmiDevice
-                                TileHero(
-                                    title = featured?.label.orEmpty(),
-                                    label = movingHint ?: featured?.detail,
-                                    asleep = if (isDevice) hdmiAsleep else null,
-                                    showStatus = isDevice,
-                                )
+                                Column(Modifier.padding(bottom = 6.dp)) {
+                                    TileHero(
+                                        title = featured?.label.orEmpty(),
+                                        label = movingHint ?: featured?.detail,
+                                        asleep = if (isDevice) hdmiAsleep else null,
+                                        showStatus = isDevice,
+                                    )
+                                    if (recommendationHint != null) {
+                                        Text(
+                                            recommendationHint,
+                                            color = TextSecondary,
+                                            fontSize = 14.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.padding(start = EdgePadding, top = 4.dp),
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -558,7 +604,7 @@ fun HomeScreen(
                     val topRow = listOfNotNull(hdmiDevice) + favourites
                     // Where Down goes from each row (its first tile); All apps' first tile is firstTile when the top row is empty
                     val allAppsFirst = if (topRow.isEmpty()) firstTile else allAppsHead
-                    val belowInputs = if (recents.isNotEmpty()) recentHead else allAppsFirst
+                    val belowInputs = if (hasRecentRow) recentHead else allAppsFirst
                     val belowTop = if (otherInputs.isNotEmpty()) inputsHead else belowInputs
                     Shelf(
                         topRow,
@@ -573,11 +619,19 @@ fun HomeScreen(
                         down = belowTop,
                     )
                     if (otherInputs.isNotEmpty()) {
-                        ShelfLabel("Inputs")
+                        ShelfLabel(stringResource(R.string.inputs))
                         Shelf(otherInputs, rememberLazyListState(), inputsHead, launchTile, {}, onFocused, down = belowInputs)
                     }
                     if (recents.isNotEmpty()) {
-                        ShelfLabel("Recent")
+                        Column {
+                            ShelfLabel(stringResource(R.string.continue_in_apps))
+                            Text(
+                                stringResource(R.string.continue_in_apps_help),
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(start = EdgePadding, top = 2.dp),
+                            )
+                        }
                         Shelf(
                             recents,
                             rememberLazyListState(),
@@ -587,8 +641,27 @@ fun HomeScreen(
                             onFocused,
                             down = allAppsFirst,
                         )
+                    } else if (recentAccessMissing) {
+                        Column {
+                            ShelfLabel(stringResource(R.string.continue_in_apps))
+                            Text(
+                                stringResource(R.string.continue_in_apps_help),
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(start = EdgePadding, top = 2.dp, bottom = 8.dp),
+                            )
+                            Pill(
+                                null,
+                                stringResource(R.string.allow_usage_access),
+                                onUsageSettings,
+                                Modifier
+                                    .padding(start = EdgePadding)
+                                    .focusRequester(recentHead)
+                                    .focusProperties { down = allAppsFirst },
+                            )
+                        }
                     }
-                    ShelfLabel("All apps")
+                    ShelfLabel(stringResource(R.string.all_apps))
                     Shelf(
                         // Settings only once the apps are in: a lazy row keeps its first visible item when the list
                         // changes, so a row that started as just [Settings] would stay scrolled to the end
@@ -635,6 +708,12 @@ fun HomeScreen(
                 backdrop = settingsBackdrop,
                 onDismiss = { settingsOpen = false },
                 onOptionsChange = ::updateOptions,
+                language = language,
+                tmdbKey = tmdbKey,
+                onSaveTmdbKey = {
+                    tmdbKey = it.trim()
+                    saveTmdbKey(context, tmdbKey)
+                },
                 onWifiSettings = onWifiSettings,
                 onPictureSettings = onPictureSettings,
                 onSoundSettings = onSoundSettings,
@@ -699,8 +778,7 @@ private fun Backdrop(image: ImageBitmap?, alpha: Float, parallax: Float) {
     }
 }
 
-// The focused app's title over its art: eyebrow, logo (or name), one line of facts, page dots. Titles rotate on their
-// own. A button only when it opens the title itself (Stremio); "Open Netflix" would just repeat the tile under it.
+// The focused app's title over its art: eyebrow, logo (or name), one line of facts, page dots and a watch action.
 @Composable
 private fun Hero(
     title: TrendingTitle,
@@ -743,7 +821,7 @@ private fun Hero(
                 PageDots(index, count)
             }
         }
-        if (title.action?.data != null) {
+        if (title.action != null) {
             Spacer(Modifier.height(14.dp))
             Pill(
                 R.drawable.ic_play,
@@ -768,10 +846,15 @@ private fun Hero(
 // The focused tile's name, and for the HDMI device (Apple TV) whether it's awake (from CEC). No button: the tile opens it.
 @Composable
 private fun TileHero(title: String, label: String?, asleep: Boolean?, showStatus: Boolean) {
+    val statusText = when (asleep) {
+        false -> stringResource(R.string.awake)
+        true -> stringResource(R.string.asleep)
+        null -> stringResource(R.string.connected)
+    }
     val (status, dot) = when (asleep) {
-        false -> "On" to Color(0xFF34C759)
-        true -> "Asleep" to Color.White.copy(alpha = 0.4f)
-        null -> "Connected" to Color.White.copy(alpha = 0.6f)
+        false -> statusText to Color(0xFF34C759)
+        true -> statusText to Color.White.copy(alpha = 0.4f)
+        null -> statusText to Color.White.copy(alpha = 0.6f)
     }
     Column(Modifier.padding(horizontal = EdgePadding).padding(bottom = 6.dp)) {
         if (label != null) {
@@ -865,15 +948,15 @@ private fun AppMenu(
                         Text(app.label, color = TextPrimary, fontSize = 20.sp, fontFamily = UiDisplay, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     val itemModifier = Modifier.fillMaxWidth()
-                    if (canMove) Pill(null, "Move", onMove, itemModifier.focusRequester(firstItem), fillWidth = true)
+                    if (canMove) Pill(null, stringResource(R.string.move), onMove, itemModifier.focusRequester(firstItem), fillWidth = true)
                     Pill(
                         null,
-                        if (isFavourite) "Remove from favourites" else "Add to favourites",
+                        stringResource(if (isFavourite) R.string.remove_favourite else R.string.add_favourite),
                         onToggleFavourite,
                         if (canMove) itemModifier else itemModifier.focusRequester(firstItem),
                         fillWidth = true,
                     )
-                    Pill(null, "App info", onAppInfo, itemModifier, fillWidth = true)
+                    Pill(null, stringResource(R.string.app_info), onAppInfo, itemModifier, fillWidth = true)
                 }
             }
         }
@@ -886,12 +969,16 @@ private fun LauncherSettingsDialog(
     backdrop: ImageBitmap?,
     onDismiss: () -> Unit,
     onOptionsChange: (LauncherOptions) -> Unit,
+    language: String,
+    tmdbKey: String,
+    onSaveTmdbKey: (String) -> Unit,
     onWifiSettings: () -> Unit,
     onPictureSettings: () -> Unit,
     onSoundSettings: () -> Unit,
     onAndroidSettings: () -> Unit,
 ) {
     val firstItem = remember { FocusRequester() }
+    var draftKey by remember(tmdbKey) { mutableStateOf(tmdbKey) }
     LaunchedEffect(Unit) { firstItem.requestFocusWhenAttached() }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -911,7 +998,7 @@ private fun LauncherSettingsDialog(
                     verticalArrangement = Arrangement.spacedBy(9.dp),
                 ) {
                     Text(
-                        "Launcher settings",
+                        stringResource(R.string.settings_title),
                         color = TextPrimary,
                         fontSize = 25.sp,
                         fontFamily = UiDisplay,
@@ -919,7 +1006,7 @@ private fun LauncherSettingsDialog(
                         modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
                     )
                     Text(
-                        "Home screen",
+                        stringResource(R.string.home_screen),
                         color = TextSecondary,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
@@ -927,43 +1014,109 @@ private fun LauncherSettingsDialog(
                     )
                     Pill(
                         null,
-                        "Weather: ${if (options.showWeather) "On" else "Off"}",
+                        stringResource(R.string.weather_toggle, stringResource(if (options.showWeather) R.string.on else R.string.off)),
                         { onOptionsChange(options.copy(showWeather = !options.showWeather)) },
                         Modifier.fillMaxWidth().focusRequester(firstItem),
                         fillWidth = true,
                     )
                     Pill(
                         null,
-                        "Recent apps: ${if (options.showRecentApps) "On" else "Off"}",
+                        stringResource(R.string.recent_toggle, stringResource(if (options.showRecentApps) R.string.on else R.string.off)),
                         { onOptionsChange(options.copy(showRecentApps = !options.showRecentApps)) },
                         Modifier.fillMaxWidth(),
                         fillWidth = true,
                     )
                     Pill(
                         null,
-                        "Streaming recommendations: ${if (options.showRecommendations) "On" else "Off"}",
+                        stringResource(R.string.recommendations_toggle, stringResource(if (options.showRecommendations) R.string.on else R.string.off)),
                         { onOptionsChange(options.copy(showRecommendations = !options.showRecommendations)) },
                         Modifier.fillMaxWidth(),
                         fillWidth = true,
                     )
                     Pill(
                         null,
-                        "OLED care: ${if (options.oledCare) "On" else "Off"}",
+                        stringResource(R.string.oled_toggle, stringResource(if (options.oledCare) R.string.on else R.string.off)),
                         { onOptionsChange(options.copy(oledCare = !options.oledCare)) },
                         Modifier.fillMaxWidth(),
                         fillWidth = true,
                     )
                     Text(
-                        "TV settings",
+                        stringResource(R.string.language_label, stringResource(if (language == "es") R.string.spanish else R.string.english)),
                         color = TextSecondary,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier.padding(start = 4.dp, top = 8.dp),
                     )
-                    Pill(null, "Wi-Fi settings", onWifiSettings, Modifier.fillMaxWidth(), fillWidth = true)
-                    Pill(null, "Picture settings", onPictureSettings, Modifier.fillMaxWidth(), fillWidth = true)
-                    Pill(null, "Sound settings", onSoundSettings, Modifier.fillMaxWidth(), fillWidth = true)
-                    Pill(null, "Android settings", onAndroidSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(
+                        null,
+                        stringResource(if (language == "es") R.string.english else R.string.spanish),
+                        { onOptionsChange(options.copy(language = if (language == "es") "en" else "es")) },
+                        Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                    Text(
+                        stringResource(R.string.tmdb_key_label),
+                        color = TextSecondary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+                    )
+                    Text(
+                        stringResource(R.string.tmdb_key_help),
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                    BasicTextField(
+                        value = draftKey,
+                        onValueChange = { draftKey = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(14.dp))
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        singleLine = true,
+                        textStyle = LocalTextStyle.current.copy(color = TextPrimary, fontSize = 16.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        visualTransformation = PasswordVisualTransformation(),
+                        decorationBox = { innerTextField ->
+                            Box {
+                                if (draftKey.isEmpty()) {
+                                    Text(stringResource(R.string.tmdb_key_hint), color = TextSecondary, fontSize = 16.sp)
+                                }
+                                innerTextField()
+                            }
+                        },
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Pill(
+                            null,
+                            stringResource(R.string.save),
+                            { onSaveTmdbKey(draftKey) },
+                            Modifier.weight(1f),
+                            fillWidth = true,
+                        )
+                        Pill(
+                            null,
+                            stringResource(R.string.clear),
+                            {
+                                draftKey = ""
+                                onSaveTmdbKey("")
+                            },
+                            Modifier.weight(1f),
+                            fillWidth = true,
+                        )
+                    }
+                    Text(
+                        stringResource(R.string.tv_settings),
+                        color = TextSecondary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+                    )
+                    Pill(null, stringResource(R.string.wifi_settings), onWifiSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, stringResource(R.string.picture_settings), onPictureSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, stringResource(R.string.sound_settings), onSoundSettings, Modifier.fillMaxWidth(), fillWidth = true)
+                    Pill(null, stringResource(R.string.android_settings), onAndroidSettings, Modifier.fillMaxWidth(), fillWidth = true)
                 }
             }
         }
@@ -1010,13 +1163,14 @@ private fun HomeHeader(
 ) {
     val context = LocalContext.current
     val is24h = DateFormat.is24HourFormat(context)
+    val locale = LocalConfiguration.current.locales[0]
     Row(
         modifier.fillMaxWidth().padding(horizontal = EdgePadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(verticalAlignment = Alignment.Bottom) {
             Text(
-                now.format(DateTimeFormatter.ofPattern(if (is24h) "HH:mm" else "h:mm")),
+                now.format(DateTimeFormatter.ofPattern(if (is24h) "HH:mm" else "h:mm", locale)),
                 color = TextPrimary,
                 fontSize = 50.sp,
                 fontFamily = UiDisplay,
@@ -1024,7 +1178,7 @@ private fun HomeHeader(
             )
             if (!is24h) {
                 Text(
-                    " " + now.format(DateTimeFormatter.ofPattern("a")).uppercase(),
+                    " " + now.format(DateTimeFormatter.ofPattern("a", locale)).uppercase(locale),
                     color = TextSecondary,
                     fontSize = 16.sp,
                     modifier = Modifier.padding(bottom = 5.dp),
@@ -1033,10 +1187,15 @@ private fun HomeHeader(
         }
         Spacer(Modifier.width(18.dp))
         Column {
-            Text(greeting(now.hour), color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            val greeting = when (now.hour) {
+                in 5..11 -> R.string.good_morning
+                in 12..16 -> R.string.good_afternoon
+                else -> R.string.good_evening
+            }
+            Text(stringResource(greeting), color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             val weatherText = weather?.let { "  ·  ${it.temperature}° ${it.summary}" }.orEmpty()
             Text(
-                now.format(DateTimeFormatter.ofPattern("EEEE d MMMM")) + weatherText,
+                now.format(DateTimeFormatter.ofPattern("EEEE d MMMM", locale)) + weatherText,
                 color = TextSecondary,
                 fontSize = 14.sp,
                 maxLines = 1,
@@ -1048,15 +1207,9 @@ private fun HomeHeader(
             Pill(R.drawable.ic_picture, null, onPicture)
             Pill(R.drawable.ic_sound, null, onSound)
             Pill(R.drawable.ic_wifi, networkLabel, onWifi)
-            Pill(R.drawable.ic_settings, "Settings", onSettings)
+            Pill(R.drawable.ic_settings, stringResource(R.string.settings), onSettings)
         }
     }
-}
-
-private fun greeting(hour: Int): String = when (hour) {
-    in 5..11 -> "Good morning"
-    in 12..16 -> "Good afternoon"
-    else -> "Good evening"
 }
 
 @Composable
@@ -1088,14 +1241,14 @@ private fun rememberNetworkLabel(): String {
 private fun networkLabel(context: Context): String {
     val connectivity = context.getSystemService(ConnectivityManager::class.java)
     val networks = connectivity.allNetworks.mapNotNull { connectivity.getNetworkCapabilities(it) }
-    if (networks.none { it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) }) return "Offline"
+    if (networks.none { it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) }) return context.getString(R.string.offline)
     return when {
-        networks.any { it.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) } -> "Ethernet"
+        networks.any { it.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) } -> context.getString(R.string.ethernet)
         networks.any { it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) } -> {
             val ssid = context.applicationContext.getSystemService(WifiManager::class.java).connectionInfo.ssid
-            ssid?.trim('"')?.takeUnless { it.isBlank() || it == "<unknown ssid>" } ?: "Wi-Fi"
+            ssid?.trim('"')?.takeUnless { it.isBlank() || it == "<unknown ssid>" } ?: context.getString(R.string.wifi)
         }
-        else -> "Online"
+        else -> context.getString(R.string.online)
     }
 }
 

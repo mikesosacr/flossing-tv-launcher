@@ -53,20 +53,23 @@ data class TrendingTitle(
     val actionLabel: String?,
 )
 
-// This week's trending titles from TMDB. Empty (and the section hidden) without a key or network.
-// Get a free key at themoviedb.org → Settings → API, then put tmdb.key=... in local.properties.
-fun fetchTrending(context: Context): List<TrendingTitle> {
-    val key = BuildConfig.TMDB_KEY
+// This week's trending titles from TMDB. The home screen shows setup/retry guidance when this feed is unavailable.
+// The key can come from local.properties, BuildConfig, or the launcher's on-device settings.
+fun fetchTrending(
+    context: Context,
+    key: String = loadTmdbKey(context),
+    language: String = "es-ES",
+): List<TrendingTitle> {
     if (key.isBlank()) return emptyList()
     return try {
-        val results = JSONObject(tmdbGet("/trending/$FEED/week", key)).getJSONArray("results")
+        val results = JSONObject(tmdbGet("/trending/$FEED/week", key, language)).getJSONArray("results")
         results.objects()
             .filter { it.optString("media_type") in setOf("movie", "tv") && !it.isNull("backdrop_path") }
             .take(MAX_TITLES)
             .mapNotNull { item ->
                 // One bad title (missing image, odd JSON) shouldn't drop the whole row
                 try {
-                    toTitle(context, key, item)
+                    toTitle(context, key, language, item)
                 } catch (e: IOException) {
                     Log.w(TAG, "Skipping ${item.optInt("id")}", e)
                     null
@@ -85,16 +88,26 @@ fun fetchTrending(context: Context): List<TrendingTitle> {
 }
 
 // [opens]: the button, when it's already known (the app whose top titles these are); else looked up per title
-private fun toTitle(context: Context, key: String, item: JSONObject, opens: Pair<Intent?, String?>? = null): TrendingTitle {
+private fun toTitle(
+    context: Context,
+    key: String,
+    language: String,
+    item: JSONObject,
+    opens: Pair<Intent?, String?>? = null,
+): TrendingTitle {
     val type = item.getString("media_type")
     val append = if (opens == null) "external_ids,watch/providers,images" else "images"
-    val details = JSONObject(tmdbGet("/$type/${item.getInt("id")}?append_to_response=$append&include_image_language=en,null", key))
+    val details = JSONObject(tmdbGet(
+        "/$type/${item.getInt("id")}?append_to_response=$append&include_image_language=en,null",
+        key,
+        language,
+    ))
     val title = item.optString("title").ifBlank { item.optString("name") }
     val year = item.optString("release_date").ifBlank { item.optString("first_air_date") }.take(4)
     val genre = details.optJSONArray("genres")?.optJSONObject(0)?.optString("name").orEmpty()
     val rating = item.optDouble("vote_average", 0.0)
     val meta = listOf(
-        if (type == "tv") "Series" else "Movie",
+        context.getString(if (type == "tv") R.string.series else R.string.movie),
         year,
         genre,
         if (rating > 0) String.format(Locale.US, "★ %.1f", rating) else "",
@@ -127,14 +140,17 @@ private fun watchAction(context: Context, type: String, details: JSONObject): Pa
     for (provider in providers) {
         val pkg = PROVIDER_APPS[provider.optInt("provider_id")] ?: continue
         val launch = pm.getLeanbackLaunchIntentForPackage(pkg) ?: continue
-        return launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to "Watch on ${provider.optString("provider_name")}"
+        return launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to context.getString(
+            R.string.watch_on,
+            provider.optString("provider_name"),
+        )
     }
     val imdb = details.optJSONObject("external_ids")?.optString("imdb_id").orEmpty()
     if (imdb.isBlank() || pm.getLeanbackLaunchIntentForPackage(STREMIO) == null) return null to null
     val stremioType = if (type == "tv") "series" else "movie"
     return Intent(Intent.ACTION_VIEW, Uri.parse("stremio:///detail/$stremioType/$imdb"))
         .setPackage(STREMIO)
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to "Open in Stremio"
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to context.getString(R.string.open_in_stremio)
 }
 
 fun TrendingTitle.decodeBackdrop(): ImageBitmap = decode(backdropJpeg).asImageBitmap()
@@ -145,6 +161,7 @@ fun TrendingTitle.decodeLogo(): ImageBitmap? = logoPng?.let { decode(it).asImage
 val TOP_SHELF_PROVIDERS = mapOf(
     "com.netflix.ninja" to "8",
     "com.amazon.amazonvideo.livingroom" to "119",
+    "com.disney.disneyplus" to "337",
     "in.startv.hotstar" to "2336",                    // JioHotstar
     "com.sonyliv" to "237",                           // Sony LIV
     "com.apple.atve.androidtv.appletv" to "350",      // Apple TV app (Apple TV+)
@@ -159,8 +176,13 @@ private const val TOP_SHELF_SKIP_TV_GENRES = "10763,10764,10766,10767"
 
 // What's popular on one streaming app in REGION right now. TMDB has no per-service charts, so this is TMDB
 // popularity among titles that app streams. The button opens the app (TMDB doesn't know Netflix/Prime title ids).
-fun fetchTopShelf(context: Context, packageName: String, appLabel: String): List<TrendingTitle> {
-    val key = BuildConfig.TMDB_KEY
+fun fetchTopShelf(
+    context: Context,
+    packageName: String,
+    appLabel: String,
+    key: String = loadTmdbKey(context),
+    language: String = "es-ES",
+): List<TrendingTitle> {
     val providers = TOP_SHELF_PROVIDERS[packageName]
     if (key.isBlank() || providers == null) return emptyList()
     val open = context.packageManager.getLeanbackLaunchIntentForPackage(packageName)?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -169,17 +191,21 @@ fun fetchTopShelf(context: Context, packageName: String, appLabel: String): List
         "&sort_by=popularity.desc&include_adult=false"
     return try {
         val shows = JSONObject(tmdbGet(
-            "/discover/tv?$common&first_air_date.gte=${today.minusDays(TOP_SHELF_SHOW_DAYS)}&without_genres=$TOP_SHELF_SKIP_TV_GENRES", key
+            "/discover/tv?$common&first_air_date.gte=${today.minusDays(TOP_SHELF_SHOW_DAYS)}&without_genres=$TOP_SHELF_SKIP_TV_GENRES",
+            key,
+            language,
         )).getJSONArray("results").objects().filter { !it.isNull("backdrop_path") }.onEach { it.put("media_type", "tv") }
         val movies = JSONObject(tmdbGet(
-            "/discover/movie?$common&primary_release_date.gte=${today.minusDays(TOP_SHELF_MOVIE_DAYS)}", key
+            "/discover/movie?$common&primary_release_date.gte=${today.minusDays(TOP_SHELF_MOVIE_DAYS)}",
+            key,
+            language,
         )).getJSONArray("results").objects().filter { !it.isNull("backdrop_path") }.onEach { it.put("media_type", "movie") }
         // Alternate show, movie, show...: movie popularity runs far higher, so a merged sort would be all movies
         (0 until maxOf(shows.size, movies.size)).flatMap { listOfNotNull(shows.getOrNull(it), movies.getOrNull(it)) }
             .take(TOP_SHELF_TITLES)
             .mapNotNull { item ->
                 try {
-                    toTitle(context, key, item, open to "Open $appLabel")
+                    toTitle(context, key, language, item, open to context.getString(R.string.open_in_app, appLabel))
                 } catch (e: IOException) {
                     Log.w(TAG, "Skipping ${item.optInt("id")}", e)
                     null
@@ -198,11 +224,11 @@ fun fetchTopShelf(context: Context, packageName: String, appLabel: String): List
 }
 
 // Accepts both the v3 API key and the v4 read access token (a JWT, starts with "eyJ")
-private fun tmdbGet(path: String, key: String): String {
-    val url = "$API$path"
-    if (key.startsWith("eyJ")) return httpGet(url, mapOf("Authorization" to "Bearer $key"))
+private fun tmdbGet(path: String, key: String, language: String): String {
     val separator = if ('?' in path) '&' else '?'
-    return httpGet("$url${separator}api_key=$key")
+    val url = "$API$path${separator}language=$language"
+    if (key.startsWith("eyJ")) return httpGet(url, mapOf("Authorization" to "Bearer $key"))
+    return httpGet("$url&api_key=$key")
 }
 
 private fun decode(bytes: ByteArray): Bitmap =

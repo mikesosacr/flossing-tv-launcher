@@ -29,7 +29,7 @@ fun fetchWeather(context: Context): Weather? {
     )
     return try {
         val current = JSONObject(httpGet(url)).getJSONObject("current")
-        Weather(current.getDouble("temperature_2m").roundToInt(), describe(current.getInt("weather_code")))
+        Weather(current.getDouble("temperature_2m").roundToInt(), describe(context, current.getInt("weather_code")))
     } catch (e: IOException) {
         Log.w(TAG, "Weather fetch failed", e)
         null
@@ -40,14 +40,14 @@ fun fetchWeather(context: Context): Weather? {
 }
 
 // WMO weather codes
-private fun describe(code: Int): String = when (code) {
-    0 -> "Clear"
-    1, 2 -> "Partly cloudy"
-    3 -> "Cloudy"
-    45, 48 -> "Fog"
-    in 51..57 -> "Drizzle"
-    in 61..67, in 80..82 -> "Rain"
-    in 71..77, 85, 86 -> "Snow"
-    in 95..99 -> "Thunderstorm"
+private fun describe(context: Context, code: Int): String = when (code) {
+    0 -> context.getString(R.string.weather_clear)
+    1, 2 -> context.getString(R.string.weather_partly_cloudy)
+    3 -> context.getString(R.string.weather_cloudy)
+    45, 48 -> context.getString(R.string.weather_fog)
+    in 51..57 -> context.getString(R.string.weather_drizzle)
+    in 61..67, in 80..82 -> context.getString(R.string.weather_rain)
+    in 71..77, 85, 86 -> context.getString(R.string.weather_snow)
+    in 95..99 -> context.getString(R.string.weather_thunderstorm)
     else -> ""
 }

@@ -1,10 +1,12 @@
 package me.prince.launcher
 
 import android.app.usage.UsageStatsManager
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ResolveInfo
 import android.provider.Settings
+import android.os.Process
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -101,6 +103,16 @@ fun recentPackages(context: Context): List<String> {
         .entries
         .sortedByDescending { it.value }
         .map { it.key }
+}
+
+@Suppress("DEPRECATION")
+fun hasUsageStatsAccess(context: Context): Boolean {
+    val appOps = context.getSystemService(AppOpsManager::class.java)
+    return appOps.checkOpNoThrow(
+        AppOpsManager.OPSTR_GET_USAGE_STATS,
+        Process.myUid(),
+        context.packageName,
+    ) == AppOpsManager.MODE_ALLOWED
 }
 
 private fun toTvApp(context: Context, info: ResolveInfo): TvApp {

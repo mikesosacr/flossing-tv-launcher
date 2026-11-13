@@ -18,10 +18,10 @@ Written up end to end here: [How I Debloated My Android TV and Built My Own Laun
 - **Top shelf for streaming apps** (needs a free TMDB key). Rest on Netflix, Prime Video, JioHotstar, Sony LIV or the Apple TV app and the screen fills with what's popular on it in your country right now: art, logo, genre, rating. Fetched in the background every 6 hours, only while the home screen is showing.
 - **Living wallpaper.** A different image for dawn, day, dusk and night that crossfades as the day goes on. It stays still: a slow drift made detailed photos shimmer. `launcher/tools/wallpapers.py` makes the set: AI art with an OpenAI key, or gradient placeholders.
 - **The TV follows the Apple TV.** Turn the Apple TV off and the TV goes to sleep; turn the TV on and it opens the Apple TV's input (waking it). Needs a few adb grants, which `deploy.sh` does.
-- **Trending this week** (optional, shown when there's no HDMI device). Popular movies and shows from [TMDB](https://www.themoviedb.org/) with a full-screen backdrop, logo and rating. The button opens **the app that streams the title in your country** (Netflix, Prime Video, Disney+, Hotstar, Apple TV+, Hulu, Paramount+) if you have it installed, otherwise the title's page in Stremio if you have that.
-- **Weather and recent apps.** Current local weather appears in the header when location is available; a Recent row shows your last-used apps. Both can be turned on or off from Launcher settings.
-- **Your apps, your order.** A favourites row, Recent row and an all-apps row (with a Launcher settings tile at the end); Down jumps straight to the next row. Long-press an app tile to **move it, add it to or remove it from favourites**, or open App info.
-- **Launcher settings.** The Settings tile and header button open launcher options for weather, Recent apps, streaming recommendations and OLED care, plus shortcuts to Wi-Fi, picture, sound and Android settings.
+- **Trending and streaming recommendations.** Popular movies and shows from [TMDB](https://www.themoviedb.org/) with full-screen art, title, rating and a **Watch on…** button when a supported app is installed. General trending remains available even when an HDMI device is connected; streaming-app recommendations appear when that app has a supported catalogue. Add a free TMDB API key in Launcher settings or at build time.
+- **Weather and “Continue in your apps.”** Current local weather appears in the header when location is available; the row opens your most recently used streaming apps. Streaming apps do not expose their exact playback title or progress to third-party launchers, so the app resumes from its own screen. Both features can be turned on or off in Launcher settings.
+- **Your apps, your order.** A favourites row, Continue in your apps row and an all-apps row (with a Launcher settings tile at the end); Down jumps straight to the next row. Long-press an app tile to **move it, add it to or remove it from favourites**, or open App info.
+- **Launcher settings.** The Settings tile and header button open launcher options for language (Spanish or English), TMDB key, weather, recent apps, streaming recommendations and OLED care, plus shortcuts to Wi-Fi, picture, sound and Android settings.
 - **HDMI inputs as tiles** on TVs, named after the connected device where the TV reports it (e.g. "Apple TV · HDMI 1"). Hidden on streaming boxes.
 - **OLED care**: pure black background, the layout drifts a few pixels every two minutes, and the screen dims after a minute of no input and 25% at night. Toggle it in Launcher settings for LCD TVs.
 
@@ -109,7 +109,7 @@ TMDB (The Movie Database) is a free, community-built film and TV database. Its A
 3. Accept the terms and fill in the short form. Personal details are fine; for the app, something like *"Personal Android TV launcher, non-commercial"* and `http://localhost` as the URL.
 4. Copy either the **API Key** or the longer **API Read Access Token**. Both work.
 
-Without a key, the launcher simply hides the trending section.
+If you don't provide a key at build time, you can enter it later in **Launcher settings → TMDB API key**. Without a key, the home screen explains how to enable recommendations instead of silently appearing empty.
 
 ### 4. Configure and build the launcher
 
@@ -123,7 +123,7 @@ Edit `local.properties`:
 | Setting | What it does |
 |---|---|
 | `sdk.dir` | Path to the Android SDK (or set `ANDROID_HOME` instead) |
-| `tmdb.key` | Your TMDB key. Empty = no trending section |
+| `tmdb.key` | Optional TMDB key. You can also enter it in Launcher settings on the TV |
 | `tmdb.region` | Two-letter country code (`IN`, `US`, `GB`…) used to pick the streaming app for the button. Empty = the TV's country setting. Set it if your TV's locale doesn't match where you live |
 | `tmdb.feed` | `all`, `movie` or `tv` |
 
@@ -162,7 +162,7 @@ adb -s $S shell pm disable-user --user 0 com.google.android.tvlauncher
 ## Customise
 
 - **Favourites:** long-press a tile → Move / Add to favourites / Remove. The order is saved on the TV. The defaults for a fresh install are at the top of `Apps.kt`.
-- **Launcher settings:** open Settings from the home header or the end of All apps to toggle weather, Recent apps, recommendations and OLED care. The same screen keeps quick links to Wi-Fi, picture, sound and Android settings.
+- **Launcher settings:** open Settings from the home header or the end of All apps to switch Spanish/English, enter your TMDB key, or toggle weather, recent apps, recommendations and OLED care. The same screen keeps quick links to Wi-Fi, picture, sound and Android settings.
 - **Streaming apps for the trending button:** add TMDB provider ids and Android TV package names to `PROVIDER_APPS` in `Trending.kt`.
 - **Font:** set `ui.font=<path>` (and `ui.font.opsz=<text>,<display>`) in `local.properties` to use any variable font with `wght` and `opsz` axes; the default is `app/fonts/inter.ttf`.
 
@@ -184,6 +184,8 @@ If the TV ever shows a black screen on Home, `adb -s <tv-ip>:5555 shell pm enabl
 - **Removing a package can crash-loop a system service.** On Xiaomi TVs, removing `com.xiaomi.android.tvsetup.partnercustomizer` makes `com.mediatek.tv.service` crash several times a second, pinning the CPU and freezing HDMI inputs. After any debloat, check that `adb shell dumpsys dropbox | grep -c system_app_crash` stays flat for a minute.
 - **Ad blocking without a VPN app.** Android's Private DNS (`settings put global private_dns_mode hostname` and `private_dns_specifier dns.adguard-dns.com`) blocks most ads with no app running in the background.
 - **The Wi-Fi button says "Wi-Fi" instead of your network name**, or **weather is hidden.** Both need location permission: run the `pm grant ... ACCESS_COARSE_LOCATION` line above. Weather also needs the TV to know its location; some streaming boxes don't, and then it stays hidden.
+- **No content recommendations appear.** Enter a TMDB API key in Launcher settings. Recommendations use TMDB catalogue data and may not list every service or every title in your region.
+- **“Continue in your apps” opens an app instead of a specific episode or movie.** Android TV does not expose streaming services' private playback progress to other launchers; each app controls its own resume screen.
 - **VPN ad blockers.** Apps like AdGuard run as a VPN, which makes the VPN the "active network". The launcher checks every network, so the Wi-Fi label still works.
 - **Firmware updates** can bring removed apps back. Re-run `./debloat.sh <tv-ip>`.
 
